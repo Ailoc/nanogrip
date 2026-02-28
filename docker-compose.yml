@@ -1,0 +1,86 @@
+# ============================================================
+# nanogrip Docker Compose 配置
+# 用于在 Docker 环境中快速部署和运行 nanogrip
+# ============================================================
+#
+# 使用方法:
+#   1. 复制配置: cp config.example.yaml config.yaml
+#   2. 编辑配置: vim config.yaml (填入 API 密钥)
+#   3. 启动服务: docker-compose up -d
+#   4. 查看日志: docker-compose logs -f
+#   5. 停止服务: docker-compose down
+#
+# ============================================================
+
+services:
+  # ========================================================
+  # nanogrip 主服务
+  # ========================================================
+  nanogrip:
+    # 构建当前目录的 Docker 镜像
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # 镜像名称
+    image: nanogrip:latest
+
+    # 容器名称
+    container_name: nanogrip
+
+    # 重新创建容器（配置更改时）
+    restart: unless-stopped
+
+    # 环境变量
+    environment:
+      - TZ=Asia/Shanghai
+      - NANOGRIP_CONFIG=/home/nanogrip/.nanogrip/config.yaml
+
+    # 端口映射 (主机端口:容器端口)
+    ports:
+      - "18790:18790"  # Gateway 端口
+
+    # 卷挂载 (主机路径:容器路径)
+    volumes:
+      # 配置文件目录
+      - ./config.yaml:/home/nanogrip/.nanogrip/config.yaml:ro
+      # 工作区目录
+      - nanogrip-workspace:/home/nanogrip/.nanogrip/workspace
+      # 技能目录（可选，自定义技能）
+      # - ./skills:/home/nanogrip/.nanogrip/skills:ro
+
+    # 网络模式
+    network_mode: host
+
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:18790/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # 资源限制（可选）
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+# ========================================================
+# 卷定义
+# ========================================================
+volumes:
+  # nanogrip 工作区卷 - 持久化对话历史和文件
+  nanogrip-workspace:
+    driver: local
+
+# ========================================================
+# 网络配置（如果不需要 host 网络模式）
+# ========================================================
+# networks:
+#   nanogrip-network:
+#     driver: bridge

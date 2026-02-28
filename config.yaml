@@ -1,0 +1,40 @@
+# nanogrip Configuration
+
+agents:
+  defaults:
+    workspace: "~/.nanogrip/workspace"
+    model: "glm-4.7-flash"
+    maxTokens: 8192
+    temperature: 0.7
+    maxToolIterations: 20
+    memoryWindow: 50
+
+channels:
+  telegram:
+    enabled: true
+    token: ""
+    # Proxy: 代理服务器地址（如需访问 Telegram API）
+    # 支持格式: http://host:port, https://host:port, socks5://host:port
+    proxy: ""
+    allowFrom: []
+
+providers:
+  custom:
+    apiKey: ""
+    apiBase: "https://open.bigmodel.cn/api/paas/v4"
+
+gateway:
+  host: "0.0.0.0"
+  port: 18790
+
+tools:
+  web:
+    search:
+      apiKey: ""
+      provider: "tavily"
+      maxResults: 5
+
+  exec:
+    timeout: 60
+
+  restrictToWorkspace: false

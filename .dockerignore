@@ -1,0 +1,36 @@
+# 忽略 Docker 构建过程中的临时文件
+# Go 构建产物
+nanobot
+*.exe
+*.dll
+*.so
+*.dylib
+
+# 测试文件
+test_*
+*_test.go
+*.test
+*.out
+
+# 开发工具
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# 文档
+*.md
+!README.md
+
+# 临时文件
+tmp/
+temp/
+*.log
+
+# Node (如果有用)
+node_modules/
+package-lock.json

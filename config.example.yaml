@@ -1,0 +1,45 @@
+# nanogrip Configuration Example
+# Copy this to ~/.nanogrip/config.yaml and fill in your API keys
+
+agents:
+  defaults:
+    workspace: "~/.nanogrip/workspace"
+    model: "glm-4-flash"
+    maxTokens: 8192
+    temperature: 0.7
+    maxToolIterations: 20
+    memoryWindow: 50
+
+channels:
+  telegram:
+    enabled: false
+    token: ""  # Bot token from @BotFather
+    # proxy: ""  # Optional: proxy server address (http://host:port, https://host:port, socks5://host:port)
+    allowFrom: []  # Allowed user IDs
+
+providers:
+  # 自定义提供商 (智谱AI)
+  custom:
+    apiKey: ""  # Your API key
+    apiBase: ""  # API base URL
+
+  # OpenRouter (推荐)
+  openrouter:
+    apiKey: ""  # Get from openrouter.ai
+    apiBase: "https://openrouter.ai/api/v1"
+
+gateway:
+  host: "0.0.0.0"
+  port: 18790
+
+tools:
+  web:
+    search:
+      apiKey: ""  # Search API key (Tavily)
+      provider: "tavily"
+      maxResults: 5
+
+  exec:
+    timeout: 60  # seconds
+
+  restrictToWorkspace: false
