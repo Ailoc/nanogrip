@@ -46,6 +46,7 @@ This project is designed for:
 - **Tool Calling**: Multi-round tool invocation with iterative refinement
 - **Context Management**: Progressive skill loading for optimized resource usage
 - **Memory System**: Long-term memory (MEMORY.md) + conversation history tracking
+- **Skills & MCP**
 
 ### 📢 Communication Channels
 
@@ -224,12 +225,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Built with [Go](https://golang.org/)
 - Powered by various LLM providers
 
----
-
-<div align="center">
-
-**Made with ❤️ by [Ailoc](https://github.com/Ailoc)**
-
-[⬆ Back to Top](#nanogrip)
-
-</div>
