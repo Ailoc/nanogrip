@@ -8,7 +8,6 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.23+-00ADD8?style=flat&logo=go)](https://golang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![GitHub Stars](https://img.shields.io/github/stars/Ailoc/nanogrip?style=social)](https://github.com/Ailoc/nanogrip)
 
 **NanoGrip** is a lightweight, high-performance AI agent framework written in Go, inspired by [HKUDS/nanobot](https://github.com/HKUDS/nanobot). It provides an efficient, stable foundation for building intelligent AI assistants.
 
