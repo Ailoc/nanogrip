@@ -1,6 +1,8 @@
 <div align="center">
 
-# nanogrip
+<div align="center">
+  <img src="imgs/logo.jpeg" alt="nanogrip" width="300"/>
+</div>
 
 ### 🤖 A Lightweight, Extensible AI Agent
 
@@ -8,11 +10,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![GitHub Stars](https://img.shields.io/github/stars/Ailoc/nanogrip?style=social)](https://github.com/Ailoc/nanogrip)
 
-**nanogrip** is a lightweight, high-performance AI agent framework written in Go, inspired by [HKUDS/nanobot](https://github.com/HKUDS/nanobot). It provides an efficient, stable foundation for building intelligent AI assistants.
-
-<div align="center">
-  <img src="imgs/logo.jpeg" alt="nanogrip" width="300"/>
-</div>
+**NanoGrip** is a lightweight, high-performance AI agent framework written in Go, inspired by [HKUDS/nanobot](https://github.com/HKUDS/nanobot). It provides an efficient, stable foundation for building intelligent AI assistants.
 
 </div>
 
