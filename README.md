@@ -191,34 +191,6 @@ Built-in skills include:
 
 ---
 
-## ⚙️ Configuration Reference
-
-```yaml
-agents:
-  defaults:
-    model: "glm-4-flash"        # Default model
-    maxTokens: 8192             # Max output tokens
-    temperature: 0.7            # Temperature parameter
-    maxToolIterations: 30       # Max tool call iterations
-    memoryWindow: 50            # Memory window size
-
-gateway:
-  host: "0.0.0.0"
-  port: 18790                   # Gateway port
-
-tools:
-  web:
-    search:
-      apiKey: ""                # Web search API key
-      provider: "tavily"        # brave or tavily
-      maxResults: 5
-  exec:
-    timeout: 120                # Command timeout (seconds)
-  restrictToWorkspace: false    # Restrict file operations
-```
-
----
-
 ## 🔮 Known Issues & Future Improvements
 
 ### Current Limitations
