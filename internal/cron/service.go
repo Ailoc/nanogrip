@@ -36,17 +36,31 @@ package cron
 
 import (
 	"container/heap"
+	"context"
 	"fmt"
 	"log"
 	"sync"
 	"time"
+
+	"github.com/Ailoc/nanogrip/internal/bus"
+	"github.com/robfig/cron/v3"
 )
+
+// AgentExecutor 定义 Agent 执行器接口
+// 用于在定时任务到期时触发 Agent 执行命令
+type AgentExecutor interface {
+	// ProcessDirect 直接处理命令并返回结果
+	ProcessDirect(ctx context.Context, message string) (string, error)
+
+	// SetToolContext 设置工具上下文（用于 Cron 任务执行时设置正确的 Channel 和 ChatID）
+	SetToolContext(channel, chatID string)
+}
 
 // Job 表示一个定时任务
 type Job struct {
 	ID             string    // 任务唯一标识符
 	Name           string    // 任务名称
-	Message        string    // 要发送的消息内容
+	Message        string    // 要发送的消息内容（兼容旧模式）
 	Schedule       Schedule  // 调度配置
 	Channel        string    // 目标频道
 	To             string    // 接收者
@@ -54,6 +68,10 @@ type Job struct {
 	DeleteAfterRun bool      // 执行后是否删除（一次性任务）
 	CreatedAt      time.Time // 任务创建时间
 	NextRun        time.Time // 下次执行时间（堆排序的关键字段）
+
+	// Agent 模式支持（方案4）
+	TriggerAgent  bool   // 是否触发 Agent 执行（true=执行命令, false=发送固定消息）
+	AgentCommand  string // Agent 要执行的命令内容
 }
 
 // Schedule 表示任务的调度配置
@@ -72,15 +90,23 @@ type Schedule struct {
 //  2. 使用 map 存储所有任务，支持快速查找和删除
 //  3. 运行独立的 goroutine 进行任务调度
 //  4. 任务执行通过回调函数 runner 进行
+//  5. 支持 Agent 模式：可通过 AgentExecutor 触发 AI 执行复杂任务
 type CronService struct {
 	jobs     map[string]*Job // 任务 map，键为任务 ID，用于快速查找
 	heap     *jobHeap        // 最小堆，按 NextRun 时间排序任务
 	mu       sync.RWMutex    // 读写锁，保护 jobs 和 heap
-	runner   func(job *Job)  // 任务执行回调函数
+	runner   func(job *Job)  // 任务执行回调函数（兼容旧版，优先使用 agentExecutor）
+
+	// Agent 模式支持
+	agentExecutor AgentExecutor  // Agent 执行器，用于触发 AI 命令执行
+	messageBus    *bus.MessageBus // 消息总线，用于发送消息结果（使用具体类型以匹配接口）
+
 	stopChan chan struct{}   // 停止信号通道
 	stopOnce sync.Once       // 确保 Stop 只执行一次
 	wg       sync.WaitGroup  // 等待组，用于跟踪调度 goroutine
 }
+
+// 移除之前的 MessageBus 接口定义，直接使用 bus.MessageBus
 
 // jobHeapItem 是堆中的元素
 // 包装 Job 并维护在堆中的索引，用于高效的更新和删除操作
@@ -142,7 +168,8 @@ func (h *jobHeap) Pop() interface{} {
 // NewCronService 创建一个新的定时任务服务
 //
 // 参数：
-//   - runner: 任务执行回调函数，当任务到期时会调用此函数
+//   - runner: 任务执行回调函数（可选，用于兼容旧版）
+//            如果设置了 AgentExecutor，runner 将被忽略
 //
 // 返回：
 //   - *CronService: 任务服务实例
@@ -153,6 +180,22 @@ func NewCronService(runner func(job *Job)) *CronService {
 		runner:   runner,
 		stopChan: make(chan struct{}),
 	}
+}
+
+// SetAgentExecutor 设置 Agent 执行器
+// 用于在 Agent 模式下触发 AI 命令执行
+func (c *CronService) SetAgentExecutor(executor AgentExecutor) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.agentExecutor = executor
+}
+
+// SetMessageBus 设置消息总线
+// 用于发送 Agent 执行结果到通信通道
+func (c *CronService) SetMessageBus(msgBus *bus.MessageBus) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messageBus = msgBus
 }
 
 // Start 启动定时任务服务
@@ -231,11 +274,149 @@ func (c *CronService) AddJob(job *Job) *Job {
 	return job
 }
 
+// executeJob 执行任务（支持 Agent 模式和 Message 模式）
+func (c *CronService) executeJob(job *Job) {
+	// 记录任务信息以便调试
+	log.Printf("[Cron] 📋 任务详情: ID=%s, Name=%s, Channel=%q, ChatID=%q, TriggerAgent=%v",
+		job.ID, job.Name, job.Channel, job.To, job.TriggerAgent)
+
+	// 优先使用 Agent 模式
+	if job.TriggerAgent {
+		c.executeAgentJob(job)
+		return
+	}
+
+	// 兼容旧版：使用 runner 回调
+	if c.runner != nil {
+		log.Printf("[Cron] 📨 使用 runner 回调发送消息")
+		c.runner(job)
+	} else {
+		log.Printf("[Cron] ⚠ 警告：runner 为 nil，任务 %s 未执行", job.Name)
+	}
+}
+
+// executeAgentJob 执行 Agent 模式的任务
+func (c *CronService) executeAgentJob(job *Job) {
+	// 【关键调试】在函数入口就输出日志
+	log.Printf("[Cron] 🔵 executeAgentJob 开始执行: 任务=%s", job.Name)
+	// 强制刷新日志
+	// os.Stdout.Sync()
+
+	log.Printf("[Cron] 🔵 准备获取锁...")
+	c.mu.RLock()
+	log.Printf("[Cron] 🔵 已获取锁")
+	executor := c.agentExecutor
+	msgBus := c.messageBus
+	c.mu.RUnlock()
+	// 强制刷新日志
+	// os.Stdout.Sync()
+
+	log.Printf("[Cron] 🔵 获取锁后: executor=%v, msgBus=%v", executor != nil, msgBus != nil)
+
+	if executor == nil {
+		log.Printf("[Cron] ⚠ 警告：AgentExecutor 未设置，任务 %s 无法执行", job.Name)
+		return
+	}
+
+	if msgBus == nil {
+		log.Printf("[Cron] ⚠ 警告：MessageBus 未设置，任务 %s 无法发送结果", job.Name)
+		return
+	}
+
+	log.Printf("[Cron] 🤖 触发 Agent 执行前: 命令=%s, Channel=%s, ChatID=%s", job.AgentCommand, job.Channel, job.To)
+
+	// 验证任务字段
+	if job.Channel == "" {
+		log.Printf("[Cron] ⚠ 警告：任务的 Channel 为空！")
+		return
+	}
+	if job.To == "" {
+		log.Printf("[Cron] ⚠ 警告：任务的 ChatID 为空！")
+		return
+	}
+
+	// 【关键修复】在执行 Agent 前，设置工具上下文
+	// 这样 Agent 调用 cron 工具添加子任务时，会使用正确的 Channel 和 ChatID
+	executor.SetToolContext(job.Channel, job.To)
+	log.Printf("[Cron] ✓ 已设置工具上下文: Channel=%s, ChatID=%s", job.Channel, job.To)
+
+	// 调用 Agent 执行命令
+	log.Printf("[Cron] 🔄 准备调用 ProcessDirect...")
+	ctx := context.Background()
+	response, err := executor.ProcessDirect(ctx, job.AgentCommand)
+	log.Printf("[Cron] 🔄 ProcessDirect 返回: response长度=%d, err=%v", len(response), err)
+
+	if err != nil {
+		log.Printf("[Cron] ❌ Agent 执行失败: %v", err)
+		// 发送错误消息
+		c.sendResult(msgBus, job, fmt.Sprintf("❌ 任务执行失败: %v", err))
+		return
+	}
+
+	log.Printf("[Cron] ✓ Agent 执行成功，响应长度: %d 字符", len(response))
+
+	// 发送 Agent 的响应结果
+	c.sendResult(msgBus, job, response)
+
+	log.Printf("[Cron] ✅ executeAgentJob 执行完成")
+}
+
+// sendResult 发送任务执行结果到通信通道
+func (c *CronService) sendResult(msgBus *bus.MessageBus, job *Job, content string) {
+	log.Printf("[Cron] sendResult 被调用: jobName=%s, channel=%s, chatID=%s", job.Name, job.Channel, job.To)
+
+	// 验证必要的字段
+	if job.Channel == "" {
+		log.Printf("[Cron] ⚠ 警告：任务 %s 的 Channel 为空，无法发送消息", job.Name)
+		return
+	}
+	if job.To == "" {
+		log.Printf("[Cron] ⚠ 警告：任务 %s 的 ChatID 为空，无法发送消息", job.Name)
+		return
+	}
+
+	// 使用 bus 包定义的 OutboundMessage 结构
+	msg := bus.OutboundMessage{
+		Channel:  job.Channel,
+		ChatID:   job.To,
+		Content:  content,
+		Metadata: map[string]interface{}{
+			"from_cron": true, // 标记消息来自 cron
+		},
+	}
+
+	// 安全地截取内容前 50 字符用于日志显示
+	contentPreview := content
+	if len(contentPreview) > 50 {
+		contentPreview = contentPreview[:50] + "..."
+	}
+	log.Printf("[Cron] 📤 准备发送消息: Channel=%s, ChatID=%s, Content=%s",
+		job.Channel, job.To, contentPreview)
+
+	if err := msgBus.PublishOutbound(msg); err != nil {
+		log.Printf("[Cron] ❌ 发送消息失败: %v", err)
+	} else {
+		log.Printf("[Cron] ✓ 消息已发送到 %s (%s)", job.Channel, job.To)
+	}
+}
+
+// min 返回两个整数中的较小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // RemoveJob 删除一个任务
 //
-// 注意：当前实现只从 jobs map 中删除，不从堆中删除。
-// 堆中的任务在下次被检查时会发现已不在 map 中而被跳过。
-// 更优的实现应该使用 heap.Remove 从堆中删除。
+// 工作流程：
+//  1. 从 jobs map 中删除任务（O(1)）
+//  2. 从堆中删除对应的任务项（O(n) 查找 + O(log n) 删除）
+//
+// 注意：由于堆中需要通过遍历找到要删除元素的索引，
+// 删除操作的时间复杂度是 O(n)。对于大量任务场景，
+// 如果频繁删除，可以考虑维护一个 id -> index 的映射。
 //
 // 参数：
 //   - id: 任务 ID
@@ -246,11 +427,29 @@ func (c *CronService) RemoveJob(id string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 检查任务是否存在，不存在返回false
 	if _, ok := c.jobs[id]; !ok {
 		return false
 	}
 
+	// 从 map 中删除
 	delete(c.jobs, id)
+
+	// 从堆中删除对应的任务项
+	// 需要遍历堆找到匹配的索引
+	for i := 0; i < len(*c.heap); i++ {
+		item := (*c.heap)[i]
+		if item.job.ID == id {
+			// 使用 heap.Remove 从堆中删除
+			// 时间复杂度：O(log n)
+			heap.Remove(c.heap, i)
+			log.Printf("[Cron] ✓ 任务已删除: %s", id)
+			return true
+		}
+	}
+
+	// 如果在堆中未找到，可能已经被执行并清理
+	log.Printf("[Cron] ⚠ 警告：任务 %s 在 map 中存在但不在堆中", id)
 	return true
 }
 
@@ -274,7 +473,7 @@ func (c *CronService) ListJobs() []*Job {
 // 根据调度类型计算：
 //   - "every": 当前时间 + 固定间隔
 //   - "at": 指定的时间戳
-//   - "cron": 根据 cron 表达式计算（简化实现，当前只是下一分钟）
+//   - "cron": 根据 cron 表达式计算（使用 robfig/cron 库）
 //
 // 参数：
 //   - schedule: 调度配置
@@ -292,12 +491,55 @@ func (c *CronService) calculateNextRun(schedule Schedule) time.Time {
 		// 否则与 time.Now() 比较时会出现时区不匹配
 		return time.UnixMilli(schedule.AtMs).In(now.Location())
 	case "cron":
-		// Simple cron parsing - just use next minute
-		// Full implementation would use a cron library
-		return now.Add(1 * time.Minute)
+		// 使用 robfig/cron 库解析 cron 表达式
+		// 支持 5 字段格式：分 时 日 月 周
+		return c.calculateCronNextRun(schedule, now)
 	default:
 		return now
 	}
+}
+
+// calculateCronNextRun 使用 cron 表达式计算下次执行时间
+//
+// 支持标准 cron 表达式格式：
+//   - 5 字段：分 时 日 月 周 (如 "0 9 * * *" 表示每天 9 点)
+//   - 支持特殊字符：* / , -
+//
+// 时区处理：
+//   - 如果指定了 TZ 字段，使用该时区计算
+//   - 否则使用本地时区
+func (c *CronService) calculateCronNextRun(schedule Schedule, now time.Time) time.Time {
+	// 创建 cron parser，使用 5 字段格式（分 时 日 月 周）
+	// 注意：不包含秒字段，与标准 Linux cron 一致
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+	// 解析 cron 表达式
+	sched, err := parser.Parse(schedule.CronExpr)
+	if err != nil {
+		log.Printf("[Cron] ⚠ 警告：解析 cron 表达式失败: %s, 错误: %v", schedule.CronExpr, err)
+		// 解析失败时，默认 1 小时后执行
+		return now.Add(1 * time.Hour)
+	}
+
+	// 处理时区
+	baseTime := now
+	if schedule.TZ != "" {
+		// 如果指定了时区，转换为该时区
+		loc, err := time.LoadLocation(schedule.TZ)
+		if err != nil {
+			log.Printf("[Cron] ⚠ 警告：加载时区失败: %s, 错误: %v，使用本地时区", schedule.TZ, err)
+		} else {
+			baseTime = now.In(loc)
+		}
+	}
+
+	// 计算下次执行时间
+	nextTime := sched.Next(baseTime)
+
+	log.Printf("[Cron] ✓ Cron 表达式解析成功: %s -> 下次执行: %v",
+		schedule.CronExpr, nextTime.Format("2006-01-02 15:04:05"))
+
+	return nextTime
 }
 
 // runLoop 运行任务调度循环（智能唤醒版本）
@@ -428,25 +670,33 @@ func (c *CronService) checkAndRun() {
 		heap.Pop(c.heap)
 
 		// 【性能优化】只在有任务执行时才输出日志，避免频繁 I/O
-		log.Printf("[Cron] ✓ 执行任务: %s (Kind=%s)", item.job.Name, item.job.Schedule.Kind)
+		modeDesc := "message"
+		if item.job.TriggerAgent {
+			modeDesc = "agent"
+		}
+		log.Printf("[Cron] ✓ 执行任务: %s (Kind=%s, Mode=%s)", item.job.Name, item.job.Schedule.Kind, modeDesc)
 		processedCount++
 
 		// 在独立 goroutine 中执行任务，避免阻塞调度循环
-		if c.runner != nil {
-			jobCopy := *item.job // 复制任务，避免并发问题
-			go func() {
-				c.runner(&jobCopy)
+		jobCopy := *item.job // 复制任务，避免并发问题
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[Cron] ❌ 任务执行 panic: %v", r)
+				}
 			}()
-		} else {
-			log.Printf("[Cron] ⚠ 警告：runner 为 nil，任务 %s 未执行", item.job.Name)
-		}
+			log.Printf("[Cron] 🔄 Goroutine 开始执行任务: %s", jobCopy.Name)
+			c.executeJob(&jobCopy)
+			log.Printf("[Cron] 🔄 Goroutine 完成执行任务: %s", jobCopy.Name)
+		}()
 
 		// 处理任务后续：删除或重新调度
 		// 【关键修复】确保 "at" 类型任务只执行一次，即使 DeleteAfterRun 标志错误
 		if item.job.DeleteAfterRun || item.job.Schedule.Kind == "at" {
 			// 一次性任务（包括 "at" 类型），从 map 中删除
+			// 注意：由于已经在锁内，直接删除，不需要调用 RemoveJob（RemoveJob 会尝试获取锁）
 			delete(c.jobs, item.job.ID)
-			log.Printf("[Cron] ✓ 一次性任务已完成: %s", item.job.Name)
+			log.Printf("[Cron] ✓ 一次性任务已从 map 删除: %s", item.job.Name)
 		} else {
 			// 周期性任务，重新计算下次执行时间
 			item.job.NextRun = c.calculateNextRun(item.job.Schedule)

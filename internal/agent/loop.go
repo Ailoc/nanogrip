@@ -490,27 +490,48 @@ func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]inte
 	return finalContent, nil
 }
 
-// ProcessDirect 直接处理消息（用于 CLI）
-// 这个方法用于命令行界面，不通过消息总线
+// ProcessDirect 直接处理消息（用于 CLI 或 Cron）
+// 这个方法用于命令行界面或 cron 任务，不通过消息总线
+// 使用当前设置的 currentChannel 和 currentChatID 作为目标
 func (a *AgentLoop) ProcessDirect(ctx context.Context, content string) (string, error) {
+	log.Printf("[AgentLoop] ProcessDirect 被调用: content=%.50s", content)
+	log.Printf("[AgentLoop] 当前上下文: currentChannel=%q, currentChatID=%q", a.currentChannel, a.currentChatID)
+
+	// 使用当前设置的 Channel 和 ChatID（由 SetToolContext 设置）
+	// 如果未设置（如 CLI 模式），使用默认值
+	channel := a.currentChannel
+	chatID := a.currentChatID
+
+	if channel == "" {
+		channel = "cli"
+	}
+	if chatID == "" {
+		chatID = "direct"
+	}
+
+	log.Printf("[AgentLoop] 将使用的: channel=%q, chatID=%q", channel, chatID)
+
 	msg := bus.InboundMessage{
 		Message: bus.Message{
-			Channel:  "cli",
+			Channel:  channel,
 			SenderID: "user",
-			ChatID:   "direct",
+			ChatID:   chatID,
 			Content:  content,
 		},
 	}
 
 	response, err := a.processMessage(ctx, msg)
 	if err != nil {
+		log.Printf("[AgentLoop] processMessage 返回错误: %v", err)
 		return "", err
 	}
 
 	if response == nil {
+		log.Printf("[AgentLoop] processMessage 返回 nil 响应")
 		return "", fmt.Errorf("no response")
 	}
 
+	log.Printf("[AgentLoop] processMessage 成功，响应长度: %d", len(response.Content))
 	return response.Content, nil
 }
 

@@ -88,27 +88,45 @@ func NewTodoTool(workspace string) *TodoTool {
 	return &TodoTool{
 		BaseTool: NewBaseTool(
 			"todo",
-			"待办事项管理工具（Agentic Task Manager）- 支持多项目/多任务的规划、执行和跟踪。\n\n设计理念：\n- Plan（规划）：创建项目和待办来规划复杂任务\n- Execute（执行）：逐步执行每个待办项\n- Track（跟踪）：通过状态跟踪任务进度\n- Review（回顾）：完成后更新状态\n\n可用操作：\n- create_project: 创建新项目\n- list_projects: 列出所有项目\n- add_todo: 添加待办事项\n- update_todo: 更新待办状态\n- list_todos: 列出项目中的待办\n- archive_project: 归档项目\n- delete_project: 删除项目",
+			"待办事项管理工具（Agentic Task Manager）- 支持多项目/多任务的规划、执行和跟踪。\n\n设计理念：\n- Plan（规划）：创建项目和待办来规划复杂任务\n- Execute（执行）：逐步执行每个待办项\n- Track（跟踪）：通过状态跟踪任务进度\n- Review（回顾）：完成后更新状态\n\n可用操作：\n- list_projects: 列出所有项目\n- add_todos: 批量添加待办事项（自动查找或创建项目）\n- update_todo: 更新待办状态\n- list_todos: 列出项目中的待办\n- archive_project: 归档项目\n- delete_project: 删除项目\n\n使用方式：\n1. 使用 add_todos + project_name，会自动查找或创建项目并添加待办\n2. 无需手动创建项目，add_todos 会自动处理",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"operation": map[string]interface{}{
 						"type":        "string",
-						"description": "操作类型: create_project(创建项目), list_projects(列出项目), archive_project(归档项目), delete_project(删除项目), add_todo(添加待办), list_todos(列出待办), update_todo(更新待办), delete_todo(删除待办)",
+						"description": "操作类型: list_projects(列出项目), add_todos(批量添加待办), list_todos(列出待办), update_todo(更新待办), archive_project(归档项目), delete_project(删除项目), delete_todo(删除待办)",
 					},
 					// 项目操作参数
 					"project_name": map[string]interface{}{
 						"type":        "string",
-						"description": "项目名称（create_project时必需）",
+						"description": "项目名称（add_todos时必需，会自动查找或创建项目）",
+					},
+					"description": map[string]interface{}{
+						"type":        "string",
+						"description": "项目描述（add_todos时如果自动创建项目会使用，可选）",
 					},
 					"project_id": map[string]interface{}{
 						"type":        "string",
-						"description": "项目ID（archive/delete/list_todos/add_todo/update_todo/delete_todo时必需）",
+						"description": "项目ID（list_todos/update_todo/delete_todo/archive_project/delete_project时必需）",
 					},
 					// 待办操作参数
-					"content": map[string]interface{}{
-						"type":        "string",
-						"description": "待办内容（add_todo时必需）",
+					"todos": map[string]interface{}{
+						"type":        "array",
+						"description": "待办事项列表（add_todos时必需），支持单个或多个待办。每个元素包含 content（必需）和 priority（可选，默认medium）",
+						"items": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"content": map[string]interface{}{
+									"type":        "string",
+									"description": "待办内容",
+								},
+								"priority": map[string]interface{}{
+									"type":        "string",
+									"description": "优先级: high(高), medium(中), low(低)，默认medium",
+								},
+							},
+							"required": []string{"content"},
+						},
 					},
 					"todo_id": map[string]interface{}{
 						"type":        "string",
@@ -117,10 +135,6 @@ func NewTodoTool(workspace string) *TodoTool {
 					"status": map[string]interface{}{
 						"type":        "string",
 						"description": "状态: pending(待处理), in_progress(进行中), completed(已完成), failed(失败)",
-					},
-					"priority": map[string]interface{}{
-						"type":        "string",
-						"description": "优先级: high(高), medium(中), low(低)，默认medium",
 					},
 					"include_archived": map[string]interface{}{
 						"type":        "boolean",
@@ -317,16 +331,14 @@ func (t *TodoTool) Execute(ctx context.Context, params map[string]interface{}) (
 
 	// 执行对应的操作
 	switch operation {
-	case "create_project":
-		return t.handleCreateProject(params)
 	case "list_projects":
 		return t.handleListProjects(params)
 	case "archive_project":
 		return t.handleArchiveProject(params)
 	case "delete_project":
 		return t.handleDeleteProject(params)
-	case "add_todo":
-		return t.handleAddTodo(params)
+	case "add_todos":
+		return t.handleAddTodos(params)
 	case "list_todos":
 		return t.handleListTodos(params)
 	case "update_todo":
@@ -334,58 +346,8 @@ func (t *TodoTool) Execute(ctx context.Context, params map[string]interface{}) (
 	case "delete_todo":
 		return t.handleDeleteTodo(params)
 	default:
-		return fmt.Sprintf(`{"error": "未知操作: %s，有效操作: create_project, list_projects, archive_project, delete_project, add_todo, list_todos, update_todo, delete_todo"}`, operation), nil
+		return fmt.Sprintf(`{"error": "未知操作: %s，有效操作: list_projects, add_todos, list_todos, update_todo, archive_project, delete_project, delete_todo"}`, operation), nil
 	}
-}
-
-// handleCreateProject 处理创建项目
-func (t *TodoTool) handleCreateProject(params map[string]interface{}) (string, error) {
-	name, _ := params["project_name"].(string)
-	if name == "" {
-		return `{"error": "project_name 是创建项目的必需参数"}`, nil
-	}
-
-	description, _ := params["description"].(string)
-
-	// 生成UUID
-	projectID := uuid.New().String()
-
-	// 创建项目
-	project := Project{
-		ID:          projectID,
-		Name:        name,
-		Description: description,
-		Status:      "active",
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
-		Stats:       ProjectStats{},
-	}
-
-	// 加载并更新索引
-	manifest, err := t.loadManifest()
-	if err != nil {
-		return fmt.Sprintf(`{"error": "加载索引失败: %v"}`, err), nil
-	}
-
-	manifest.Projects = append(manifest.Projects, project)
-
-	if err := t.saveManifest(manifest); err != nil {
-		return fmt.Sprintf(`{"error": "保存索引失败: %v"}`, err), nil
-	}
-
-	// 创建空的待办文件
-	todoData := TodoListData{
-		ProjectID:   projectID,
-		ProjectName: name,
-		Timestamp:   time.Now(),
-		Todos:       []TodoItem{},
-	}
-	if err := t.saveProjectTodos(&todoData); err != nil {
-		return fmt.Sprintf(`{"error": "创建待办文件失败: %v"}`, err), nil
-	}
-
-	return fmt.Sprintf(`{"status": "created", "project_id": "%s", "project_name": "%s"}`,
-		projectID, name), nil
 }
 
 // handleListProjects 处理列出项目
@@ -539,75 +501,163 @@ func (t *TodoTool) handleDeleteProject(params map[string]interface{}) (string, e
 		projectID, projectName), nil
 }
 
-// handleAddTodo 处理添加待办
-func (t *TodoTool) handleAddTodo(params map[string]interface{}) (string, error) {
-	projectID, _ := params["project_id"].(string)
-	if projectID == "" {
-		return `{"error": "project_id 是添加待办的必需参数"}`, nil
+// handleAddTodos 批量添加待办事项
+// 通过 project_name 自动查找或创建项目，然后添加待办
+func (t *TodoTool) handleAddTodos(params map[string]interface{}) (string, error) {
+	// 获取 todos 列表
+	todosParam, exists := params["todos"]
+	if !exists {
+		return `{"error": "todos 是批量添加待办的必需参数，应为数组格式"}`, nil
 	}
 
-	content, _ := params["content"].(string)
-	if content == "" {
-		return `{"error": "content 是添加待办的必需参数"}`, nil
+	todosList, ok := todosParam.([]interface{})
+	if !ok {
+		return `{"error": "todos 参数格式错误，应为数组格式"}`, nil
 	}
 
-	// 获取优先级
-	priority, _ := params["priority"].(string)
-	if priority == "" {
-		priority = "medium"
-	}
-	if priority != "high" && priority != "medium" && priority != "low" {
-		priority = "medium"
+	if len(todosList) == 0 {
+		return `{"error": "todos 列表不能为空"}`, nil
 	}
 
-	// 验证项目存在
+	// 获取项目名称（必需）
+	projectName, _ := params["project_name"].(string)
+	if projectName == "" {
+		return `{"error": "project_name 是必需参数，用于自动查找或创建项目"}`, nil
+	}
+
+	projectDesc, _ := params["description"].(string)
+
+	// 加载项目索引
 	manifest, err := t.loadManifest()
 	if err != nil {
 		return fmt.Sprintf(`{"error": "加载索引失败: %v"}`, err), nil
 	}
 
-	projectName := ""
+	var finalProjectID string
+	projectCreated := false
+
+	// 查找是否存在同名项目
 	found := false
 	for _, p := range manifest.Projects {
-		if p.ID == projectID && p.Status != "deleted" {
-			projectName = p.Name
+		if p.Name == projectName && p.Status != "deleted" {
+			finalProjectID = p.ID
 			found = true
 			break
 		}
 	}
 
+	var finalProjectName = projectName
+
 	if !found {
-		return fmt.Sprintf(`{"error": "未找到项目: %s"}`, projectID), nil
+		// 项目不存在，自动创建
+		projectID := uuid.New().String()
+		project := Project{
+			ID:          projectID,
+			Name:        projectName,
+			Description: projectDesc,
+			Status:      "active",
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+			Stats:       ProjectStats{},
+		}
+
+		manifest.Projects = append(manifest.Projects, project)
+		if err := t.saveManifest(manifest); err != nil {
+			return fmt.Sprintf(`{"error": "创建项目失败: %v"}`, err), nil
+		}
+
+		// 创建空的待办文件
+		todoData := TodoListData{
+			ProjectID:   projectID,
+			ProjectName: projectName,
+			Timestamp:   time.Now(),
+			Todos:       []TodoItem{},
+		}
+		if err := t.saveProjectTodos(&todoData); err != nil {
+			return fmt.Sprintf(`{"error": "创建待办文件失败: %v"}`, err), nil
+		}
+
+		finalProjectID = projectID
+		projectCreated = true
 	}
 
-	// 加载待办
-	todoData, err := t.loadProjectTodos(projectID)
+	// 加载现有待办
+	todoData, err := t.loadProjectTodos(finalProjectID)
 	if err != nil {
 		return fmt.Sprintf(`{"error": "加载待办失败: %v"}`, err), nil
 	}
 
-	// 创建待办
-	todo := TodoItem{
-		ID:        fmt.Sprintf("todo-%d", time.Now().UnixNano()),
-		Content:   content,
-		Status:    "pending",
-		Priority:  priority,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+	// 批量创建待办
+	addedCount := 0
+	var addedTodoIDs []string
+	baseTimestamp := time.Now()
+
+	for i, todoItem := range todosList {
+		todoMap, ok := todoItem.(map[string]interface{})
+		if !ok {
+			continue // 跳过格式错误的项
+		}
+
+		content, _ := todoMap["content"].(string)
+		if content == "" {
+			continue // 跳过空内容的项
+		}
+
+		// 获取优先级（可选）
+		priority, _ := todoMap["priority"].(string)
+		if priority == "" {
+			priority = "medium"
+		}
+		if priority != "high" && priority != "medium" && priority != "low" {
+			priority = "medium"
+		}
+
+		// 创建待办（使用递增的时间戳确保ID唯一）
+		todo := TodoItem{
+			ID:        fmt.Sprintf("todo-%d", baseTimestamp.UnixNano()+int64(i)),
+			Content:   content,
+			Status:    "pending",
+			Priority:  priority,
+			CreatedAt: baseTimestamp.Add(time.Duration(i) * time.Millisecond),
+			UpdatedAt: baseTimestamp.Add(time.Duration(i) * time.Millisecond),
+		}
+
+		todoData.Todos = append(todoData.Todos, todo)
+		addedTodoIDs = append(addedTodoIDs, todo.ID)
+		addedCount++
 	}
 
-	todoData.Todos = append(todoData.Todos, todo)
-	todoData.ProjectName = projectName
+	if addedCount == 0 {
+		return `{"error": "没有有效的待办项被添加，请检查 todos 参数格式"}`, nil
+	}
+
+	todoData.ProjectName = finalProjectName
 
 	if err := t.saveProjectTodos(todoData); err != nil {
 		return fmt.Sprintf(`{"error": "保存待办失败: %v"}`, err), nil
 	}
 
 	// 更新统计
-	t.updateProjectStats(projectID)
+	t.updateProjectStats(finalProjectID)
 
-	return fmt.Sprintf(`{"status": "added", "todo_id": "%s", "project_id": "%s", "content": "%s", "priority": "%s"}`,
-		todo.ID, projectID, content, priority), nil
+	// 构建结果 JSON
+	result := map[string]interface{}{
+		"status":       "batch_added",
+		"project_id":   finalProjectID,
+		"project_name": finalProjectName,
+		"count":        addedCount,
+		"todo_ids":     addedTodoIDs,
+	}
+
+	// 如果是新创建的项目，添加提示
+	if projectCreated {
+		result["project_created"] = true
+		result["message"] = fmt.Sprintf("已自动创建项目 '%s' 并添加 %d 个待办", finalProjectName, addedCount)
+	}
+
+	resultJSON, _ := json.MarshalIndent(result, "", "  ")
+
+	return string(resultJSON), nil
 }
 
 // handleListTodos 处理列出待办

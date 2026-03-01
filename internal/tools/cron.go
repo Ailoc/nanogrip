@@ -14,6 +14,10 @@ import (
 
 // CronTool 提供定时调度功能
 // 允许代理创建和管理定时任务、提醒和周期性任务
+//
+// 支持两种模式：
+//  1. message 模式：发送固定的消息内容
+//  2. agent 模式：触发 Agent 执行命令，可以调用工具、查询数据等
 type CronTool struct {
 	BaseTool
 	cronService *cron.CronService // Cron服务实例，负责实际的任务调度
@@ -33,7 +37,7 @@ func NewCronTool(cronService *cron.CronService) *CronTool {
 	return &CronTool{
 		BaseTool: NewBaseTool(
 			"cron",
-			"Schedule reminders and recurring tasks. Actions: add, list, remove.\n\nFor add action:\n- Use 'once_seconds' for one-time reminders (e.g., remind me in 2 minutes)\n- Use 'every_seconds' for recurring tasks (e.g., every 5 minutes)\n- Use 'at' for specific time (e.g., '2026-02-12T10:30:00')",
+			"Schedule reminders and recurring tasks. Actions: add, list, remove.\n\nFor add action:\n- Use 'mode' to specify execution mode: 'message' (send fixed text) or 'agent' (trigger AI command execution)\n- For 'message' mode: use 'message' parameter for the text content\n- For 'agent' mode: use 'command' parameter for the AI command to execute\n- Use 'once_seconds' for one-time reminders (e.g., remind me in 2 minutes)\n- Use 'every_seconds' for recurring tasks (e.g., every 5 minutes)\n- Use 'at' for specific time (e.g., '2026-02-12T10:30:00')\n\nExamples:\n- Message mode: {\"action\":\"add\", \"mode\":\"message\", \"message\":\"Hello\", \"once_seconds\":60}\n- Agent mode: {\"action\":\"add\", \"mode\":\"agent\", \"command\":\"查询今天天气\", \"every_seconds\":3600}",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -42,9 +46,18 @@ func NewCronTool(cronService *cron.CronService) *CronTool {
 						"enum":        []string{"add", "list", "remove"},
 						"description": "Action to perform",
 					},
+					"mode": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"message", "agent"},
+						"description": "Execution mode: 'message' sends fixed text, 'agent' triggers AI command execution (default: message)",
+					},
 					"message": map[string]interface{}{
 						"type":        "string",
-						"description": "Reminder message (for add)",
+						"description": "Text content to send (for message mode)",
+					},
+					"command": map[string]interface{}{
+						"type":        "string",
+						"description": "AI command to execute (for agent mode). The AI will use tools to complete the task.",
 					},
 					"once_seconds": map[string]interface{}{
 						"type":        "integer",
@@ -118,25 +131,31 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]interface{}) (
 }
 
 // addJob 添加一个新的定时任务
+// 支持两种执行模式：
+//  1. message 模式：发送固定的消息内容（兼容旧版）
+//  2. agent 模式：触发 Agent 执行命令，可以调用工具、查询数据等
+//
 // 支持三种调度方式：周期性（every_seconds）、一次性（once_seconds, at）、cron表达式（cron_expr）
 // 参数:
 //
-//	params: 参数map，必须包含"message"和至少一种调度方式
+//	params: 参数map，必须包含"action"，可选"mode"（默认message）
 //
 // 返回:
 //
 //	任务创建结果的描述字符串
 func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 	// 获取参数
+	mode, _ := params["mode"].(string)
 	message, _ := params["message"].(string)
+	command, _ := params["command"].(string)
 	everySeconds, _ := params["every_seconds"].(float64)
 	onceSeconds, _ := params["once_seconds"].(float64)
 	cronExpr, _ := params["cron_expr"].(string)
 	at, _ := params["at"].(string)
 
-	// 验证消息参数
-	if message == "" {
-		return "Error: message is required for add", nil
+	// 默认模式为 message
+	if mode == "" {
+		mode = "message"
 	}
 
 	// 验证会话上下文
@@ -144,20 +163,43 @@ func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 		return "Error: no session context (channel/chat_id)", nil
 	}
 
+	// 根据模式验证参数
+	var taskContent string  // 任务内容（用于 Name）
+	var triggerAgent bool   // 是否触发 Agent
+	var agentCommand string // Agent 命令
+
+	if mode == "agent" {
+		// Agent 模式：需要 command 参数
+		if command == "" {
+			return "Error: 'command' parameter is required for agent mode", nil
+		}
+		taskContent = command
+		triggerAgent = true
+		agentCommand = command
+		log.Printf("[CronTool] Agent模式任务: %s", command)
+	} else {
+		// Message 模式：需要 message 参数
+		if message == "" {
+			return "Error: 'message' parameter is required for message mode", nil
+		}
+		taskContent = message
+		triggerAgent = false
+		log.Printf("[CronTool] Message模式任务: %s", message)
+	}
+
 	// 构建调度配置
 	schedule := cron.Schedule{}
 	deleteAfter := false // 默认不删除
 
 	if onceSeconds > 0 {
-		// 【新增】一次性延迟任务（N秒后执行一次）
-		// 例如：2分钟后提醒我
+		// 一次性延迟任务（N秒后执行一次）
 		targetTime := time.Now().Add(time.Duration(onceSeconds) * time.Second)
 		schedule = cron.Schedule{
 			Kind: "at",
 			AtMs: targetTime.UnixMilli(),
 		}
 		deleteAfter = true
-		log.Printf("[CronTool] 创建一次性延迟任务: %s, %d秒后执行 (%v)", message, int64(onceSeconds), targetTime)
+		log.Printf("[CronTool] 创建一次性延迟任务: %s, %d秒后执行 (%v)", taskContent, int64(onceSeconds), targetTime)
 	} else if everySeconds > 0 {
 		// 周期性任务（每隔N秒执行一次）
 		schedule = cron.Schedule{
@@ -165,7 +207,7 @@ func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 			EveryMs: int64(everySeconds) * 1000,
 		}
 		deleteAfter = false
-		log.Printf("[CronTool] 创建周期性任务: %s, 每%d秒执行一次", message, int64(everySeconds))
+		log.Printf("[CronTool] 创建周期性任务: %s, 每%d秒执行一次", taskContent, int64(everySeconds))
 	} else if cronExpr != "" {
 		// Cron表达式任务（如：每天9点执行）
 		schedule = cron.Schedule{
@@ -173,13 +215,11 @@ func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 			CronExpr: cronExpr,
 		}
 		deleteAfter = false
-		log.Printf("[CronTool] 创建cron任务: %s, 表达式: %s", message, cronExpr)
+		log.Printf("[CronTool] 创建cron任务: %s, 表达式: %s", taskContent, cronExpr)
 	} else if at != "" {
 		// 一次性任务（在指定时间执行一次）
-		// 解析 ISO datetime 字符串
 		targetTime, err := time.ParseInLocation("2006-01-02T15:04:05", at, time.Local)
 		if err != nil {
-			// 尝试其他常见格式
 			targetTime, err = time.ParseInLocation("2006-01-02T15:04", at, time.Local)
 		}
 		if err != nil {
@@ -199,25 +239,32 @@ func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 
 	// 创建任务
 	job := &cron.Job{
-		Name:           message,
-		Message:        message,
+		Name:           taskContent,
+		Message:        message, // Message 模式的内容
 		Schedule:       schedule,
 		Channel:        t.channel,
 		To:             t.chatID,
 		Deliver:        true,
 		DeleteAfterRun: deleteAfter,
+		// Agent 模式字段
+		TriggerAgent: triggerAgent,
+		AgentCommand: agentCommand,
 	}
 
 	// 添加到调度器
 	t.cronService.AddJob(job)
 
-	return "Created job '" + job.Name + "' (id: " + job.ID + ", type: " + schedule.Kind + ")", nil
+	modeDesc := "agent"
+	if !triggerAgent {
+		modeDesc = "message"
+	}
+	return fmt.Sprintf("Created %s job '%s' (id: %s, type: %s)", modeDesc, job.Name, job.ID, schedule.Kind), nil
 }
 
 // listJobs 列出所有已调度的任务
 // 返回:
 //
-//	所有任务的列表字符串，包含任务名称、ID、调度类型和状态
+//	所有任务的列表字符串，包含任务名称、ID、调度类型、模式和状态
 func (t *CronTool) listJobs() (string, error) {
 	jobs := t.cronService.ListJobs()
 
@@ -238,7 +285,13 @@ func (t *CronTool) listJobs() (string, error) {
 			jobType = "scheduled"
 		}
 
-		result += fmt.Sprintf("- %s (id: %s, type: %s)\n", job.Name, job.ID, jobType)
+		// 显示执行模式
+		mode := "message"
+		if job.TriggerAgent {
+			mode = "agent"
+		}
+
+		result += fmt.Sprintf("- %s (id: %s, type: %s, mode: %s)\n", job.Name, job.ID, jobType, mode)
 	}
 
 	result += "\nTo remove a job, use 'remove' action with the job_id."

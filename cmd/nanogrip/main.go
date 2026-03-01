@@ -13,7 +13,7 @@ package main
 import (
 	"bufio"         // bufio 用于缓冲读取
 	"context"       // context 用于控制并发和取消操作
-	"encoding/json"  // json 用于解析消息 JSON
+	"encoding/json" // json 用于解析消息 JSON
 	"flag"          // flag 用于解析命令行参数
 	"fmt"           // fmt 用于格式化输出
 	"log"           // log 用于日志记录
@@ -26,15 +26,15 @@ import (
 	"time"          // time 用于超时和时间处理
 
 	// 内部包导入
-	"github.com/Ailoc/nanogrip/internal/agent"      // Agent 核心逻辑
-	"github.com/Ailoc/nanogrip/internal/bus"        // 消息总线
-	"github.com/Ailoc/nanogrip/internal/channels"   // 通信通道
-	"github.com/Ailoc/nanogrip/internal/config"     // 配置管理
-	"github.com/Ailoc/nanogrip/internal/cron"       // 定时任务服务
-	"github.com/Ailoc/nanogrip/internal/mcp"        // MCP 客户端
-	"github.com/Ailoc/nanogrip/internal/providers"  // LLM 提供商
-	"github.com/Ailoc/nanogrip/internal/session"    // 会话管理
-	"github.com/Ailoc/nanogrip/internal/tools"      // 工具集
+	"github.com/Ailoc/nanogrip/internal/agent"     // Agent 核心逻辑
+	"github.com/Ailoc/nanogrip/internal/bus"       // 消息总线
+	"github.com/Ailoc/nanogrip/internal/channels"  // 通信通道
+	"github.com/Ailoc/nanogrip/internal/config"    // 配置管理
+	"github.com/Ailoc/nanogrip/internal/cron"      // 定时任务服务
+	"github.com/Ailoc/nanogrip/internal/mcp"       // MCP 客户端
+	"github.com/Ailoc/nanogrip/internal/providers" // LLM 提供商
+	"github.com/Ailoc/nanogrip/internal/session"   // 会话管理
+	"github.com/Ailoc/nanogrip/internal/tools"     // 工具集
 )
 
 // CLIFlags 命令行参数结构体
@@ -748,33 +748,26 @@ func runGateway(configPath string) {
 	toolRegistry.Register(spawnTool)
 
 	// 注册定时任务工具（Cron）
+	// 【方案4实现】支持 Agent 模式：可以触发 AI 执行复杂任务
 	cronService := cron.NewCronService(func(job *cron.Job) {
-		// 【调试日志】显示 cron runner 被调用
-		log.Printf("[Cron Runner] 触发任务: %s, Channel: %s, ChatID: %s", job.Name, job.Channel, job.To)
+		// 兼容旧版：Message 模式直接发送消息
+		log.Printf("[Cron Runner] 发送消息: %s", job.Message)
 
-		// 【关键修复】直接发送 OutboundMessage，绕过 Agent 处理
-		// 这样可以避免 LLM 将 cron 消息误解为用户请求，防止无限循环
 		msg := bus.OutboundMessage{
-			Channel:  job.Channel,
-			ChatID:   job.To,
-			Content:  job.Message,
+			Channel: job.Channel,
+			ChatID:  job.To,
+			Content: job.Message,
 			Metadata: map[string]interface{}{
-				"from_cron": true, // 标记消息来自 cron
+				"from_cron": true,
 			},
 		}
 		if err := msgBus.PublishOutbound(msg); err != nil {
 			log.Printf("[Cron Runner] 发送消息失败: %v", err)
-		} else {
-			log.Printf("[Cron Runner] 消息已直接发送到通道: %s", job.Message)
 		}
 	})
 	cronTool := tools.NewCronTool(cronService)
 	toolRegistry.Register(cronTool)
 	log.Println("注册定时任务工具: cron")
-
-	// 【关键修复】启动定时任务服务
-	cronService.Start()
-	log.Println("定时任务服务已启动")
 
 	// ============================================
 	// 第7步：启动 MCP 客户端
@@ -820,6 +813,16 @@ func runGateway(configPath string) {
 	)
 
 	agentLoop.SetMessageChan(messageChan)
+
+	// 【方案4】设置 Cron 服务的 Agent 执行器
+	// 这样定时任务就可以触发 AI 执行复杂操作
+	cronService.SetAgentExecutor(agentLoop)
+	cronService.SetMessageBus(msgBus)
+	log.Println("Cron 服务已配置 Agent 执行器")
+
+	// 【关键修复】启动定时任务服务
+	cronService.Start()
+	log.Println("定时任务服务已启动")
 
 	// ============================================
 	// 第9步：创建通道管理器
@@ -883,10 +886,10 @@ func runGateway(configPath string) {
 
 				// 发布到消息总线
 				outboundMsg := bus.OutboundMessage{
-					Channel:  channel,
-					ChatID:   chatID,
-					Content:  content,
-					Media:    mediaList,
+					Channel: channel,
+					ChatID:  chatID,
+					Content: content,
+					Media:   mediaList,
 					Metadata: map[string]interface{}{
 						"media_type": mediaType,
 					},
@@ -961,11 +964,19 @@ func processOutbound(ctx context.Context, msgBus *bus.MessageBus, channelManager
 				continue
 			}
 
+			log.Printf("[processOutbound] 收到消息: Channel=%s, ChatID=%s, Content=%.50s",
+				msg.Channel, msg.ChatID, msg.Content)
+
 			channel := channelManager.GetChannel(msg.Channel)
-			if channel != nil {
-				if err := channel.Send(msg); err != nil {
-					log.Printf("发送消息失败: %v", err)
-				}
+			if channel == nil {
+				log.Printf("[processOutbound] ⚠ 警告：找不到通道 '%s'，消息丢弃", msg.Channel)
+				continue
+			}
+
+			if err := channel.Send(msg); err != nil {
+				log.Printf("[processOutbound] ❌ 发送消息失败: %v", err)
+			} else {
+				log.Printf("[processOutbound] ✓ 消息已发送到 %s (%s)", msg.Channel, msg.ChatID)
 			}
 		}
 	}
