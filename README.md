@@ -1,7 +1,7 @@
 <div align="center">
 
 <div align="center">
-  <img src="imgs/logo.jpeg" alt="nanogrip" width="300"/>
+  <img src="imgs/logo.jpeg" alt="nanogrip" width="400"/>
 </div>
 
 ### 🤖 A Lightweight, Extensible AI Agent
@@ -55,7 +55,7 @@ This project is designed for:
 **Telegram Interaction Example:**
 
 <div align="center">
-  <img src="imgs/telegram.jpg" alt="NanoGrip Telegram Bot Interaction" width="600"/>
+  <img src="imgs/telegram.jpg" alt="NanoGrip Telegram Bot Interaction" width="800"/>
 </div>
 
 ### 🛠️ Built-in Tools
