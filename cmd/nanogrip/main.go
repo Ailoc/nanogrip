@@ -162,19 +162,10 @@ func handleStatus(configPath string) {
 	fmt.Printf("最大令牌数: %d\n", cfg.Agents.Defaults.MaxTokens)
 	fmt.Printf("温度: %.1f\n", cfg.Agents.Defaults.Temperature)
 
-	// 检查 Gateway 端口
-	fmt.Printf("Gateway 端口: %d\n", cfg.Gateway.Port)
-
 	// 检查通道状态
 	fmt.Println("\n通道状态:")
 	if cfg.Channels.Telegram.Enabled {
 		fmt.Println("  ✓ Telegram 已启用")
-	}
-	if cfg.Channels.WhatsApp.Enabled {
-		fmt.Println("  ✓ WhatsApp 已启用")
-	}
-	if cfg.Channels.Discord.Enabled {
-		fmt.Println("  ✓ Discord 已启用")
 	}
 }
 
@@ -269,7 +260,7 @@ tools:
   # Web 搜索
   web:
     search:
-      apiKey: ""  # Brave Search API Key
+      apiKey: ""  # Tavily Search API Key
       maxResults: 5
 
   # Shell 命令
@@ -284,32 +275,11 @@ tools:
 channels:
   telegram:
     enabled: false
-    botToken: ""
-
-  discord:
-    enabled: false
-    botToken: ""
-
-  slack:
-    enabled: false
-    botToken: ""
-
-  whatsapp:
-    enabled: false
-
-  dingtalk:
-    enabled: false
-    secret: ""
     token: ""
+    allowFrom: []
 
-# 心跳配置
-heartbeat:
-  enabled: false
-  interval: 1800  # 秒(默认30分钟)
-
-# 日志配置
-logging:
-  level: "info"  # debug, info, warn, error
+# MCP 服务器配置
+mcpServers: {}
 `
 }
 
@@ -402,6 +372,14 @@ func runAgent(configPath, message string) {
 
 	// 创建工具注册表
 	toolRegistry := tools.NewToolRegistry()
+	if cfg.Tools.Web.Search.APIKey != "" {
+		toolRegistry.Register(tools.NewWebSearchTool(
+			cfg.Tools.Web.Search.APIKey,
+			cfg.Tools.Web.Search.Provider,
+			cfg.Tools.Web.Search.MaxResults,
+		))
+		log.Printf("注册网络搜索工具: Tavily (maxResults: %d)", cfg.Tools.Web.Search.MaxResults)
+	}
 	toolRegistry.Register(tools.NewShellTool(cfg.Tools.Exec.Timeout))
 	toolRegistry.Register(tools.NewFilesystemTool(workspace, cfg.Tools.RestrictToWorkspace))
 
@@ -712,17 +690,12 @@ func runGateway(configPath string) {
 	toolRegistry := tools.NewToolRegistry()
 
 	if cfg.Tools.Web.Search.APIKey != "" {
-		// 获取搜索提供商，默认使用 brave
-		provider := cfg.Tools.Web.Search.Provider
-		if provider == "" {
-			provider = "brave"
-		}
 		toolRegistry.Register(tools.NewWebSearchTool(
 			cfg.Tools.Web.Search.APIKey,
-			provider,
+			cfg.Tools.Web.Search.Provider,
 			cfg.Tools.Web.Search.MaxResults,
 		))
-		log.Printf("注册网络搜索工具: %s (provider: %s)", provider, cfg.Tools.Web.Search.Provider)
+		log.Printf("注册网络搜索工具: Tavily (maxResults: %d)", cfg.Tools.Web.Search.MaxResults)
 	} else {
 		log.Println("警告: 未配置网络搜索 API Key，请在配置文件中设置 tools.web.search.apiKey 以启用搜索功能")
 	}

@@ -13,48 +13,31 @@ import (
 )
 
 // web.go - Web搜索工具
-// 此文件实现了 WebSearchTool：
-// 1. WebSearchTool - 支持 Brave Search 和 Tavily 搜索
-
-// SearchProvider 搜索提供商类型
-type SearchProvider string
-
-const (
-	ProviderBrave  SearchProvider = "brave"
-	ProviderTavily SearchProvider = "tavily"
-)
+// 此文件实现了 WebSearchTool，支持 Tavily 搜索
 
 // WebSearchTool 提供网络搜索功能
-// 支持 Brave Search API 和 Tavily Search API
+// 使用 Tavily Search API
 type WebSearchTool struct {
 	BaseTool
-	apiKey     string         // API密钥
-	provider   SearchProvider // 搜索提供商
-	maxResults int            // 最多返回的搜索结果数量
-	httpClient *http.Client   // HTTP客户端，配置了超时时间
+	apiKey     string // API密钥
+	maxResults int    // 最多返回的搜索结果数量
+	httpClient *http.Client // HTTP客户端，配置了超时时间
 }
 
 // NewWebSearchTool 创建一个新的网络搜索工具
 // 参数:
 //
-//	apiKey: API密钥 (Brave 或 Tavily)
-//	provider: 搜索提供商 (brave 或 tavily)
+//	apiKey: Tavily API 密钥
 //	maxResults: 最多返回的搜索结果数量
 //
 // 返回:
 //
 //	配置好的WebSearchTool实例
 func NewWebSearchTool(apiKey string, provider string, maxResults int) *WebSearchTool {
-	// 默认使用 Brave
-	searchProvider := ProviderBrave
-	if provider == "tavily" {
-		searchProvider = ProviderTavily
-	}
-
 	return &WebSearchTool{
 		BaseTool: NewBaseTool(
 			"web_search",
-			"Search the web for information using Brave Search or Tavily",
+			"Search the web for information using Tavily Search API",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -67,14 +50,13 @@ func NewWebSearchTool(apiKey string, provider string, maxResults int) *WebSearch
 			},
 		),
 		apiKey:     apiKey,
-		provider:   searchProvider,
 		maxResults: maxResults,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
 // Execute 执行网络搜索
-// 支持 Brave Search API 和 Tavily Search API
+// 使用 Tavily Search API
 // 参数:
 //
 //	ctx: 上下文对象
@@ -95,83 +77,8 @@ func (t *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 		return "", fmt.Errorf("web search API key not configured")
 	}
 
-	// 根据提供商执行搜索
-	switch t.provider {
-	case ProviderTavily:
-		return t.searchTavily(ctx, query)
-	case ProviderBrave:
-		fallthrough
-	default:
-		return t.searchBrave(ctx, query)
-	}
-}
-
-// searchBrave 执行 Brave Search API
-func (t *WebSearchTool) searchBrave(ctx context.Context, query string) (string, error) {
-	apiURL := "https://api.search.brave.com/res/v1/web/search"
-	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
-	if err != nil {
-		return "", err
-	}
-
-	q := req.URL.Query()
-	q.Add("q", query)
-	q.Add("count", fmt.Sprintf("%d", t.maxResults))
-	req.URL.RawQuery = q.Encode()
-
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Subscription-Token", t.apiKey)
-
-	resp, err := t.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("search API returned status %d: %s", resp.StatusCode, string(body))
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return "", err
-	}
-
-	webResults, ok := result["web"].(map[string]interface{})
-	if !ok {
-		return "[]", nil
-	}
-
-	results, ok := webResults["results"].([]interface{})
-	if !ok {
-		return "[]", nil
-	}
-
-	output := make([]map[string]string, 0, len(results))
-	for _, r := range results {
-		rr, ok := r.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		title, _ := rr["title"].(string)
-		desc, _ := rr["description"].(string)
-		link, _ := rr["url"].(string)
-
-		output = append(output, map[string]string{
-			"title":       title,
-			"description": desc,
-			"url":         link,
-		})
-	}
-
-	b, _ := json.Marshal(output)
-	return string(b), nil
+	// 执行 Tavily 搜索
+	return t.searchTavily(ctx, query)
 }
 
 // searchTavily 执行 Tavily Search API
@@ -331,5 +238,5 @@ func SearchTavilyDeep(query string) (string, error) {
 		}
 	}
 
-	return content.String(), scanner.Err()
+	return content.String(), nil
 }

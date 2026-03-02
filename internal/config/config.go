@@ -7,8 +7,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config 表示 nanobot 的根配置结构体
-// 这个结构体包含了整个系统的所有配置项，包括代理、通道、提供商、网关和工具
+// Config 表示 nanogrip 的根配置结构体
+// 这个结构体包含了整个系统的所有配置项，包括代理、通道、提供商和工具
 type Config struct {
 	// Agents 代理配置，包含代理的默认行为设置
 	// `yaml:"agents"` 表示此字段对应 YAML 文件中的 "agents" 键
@@ -21,10 +21,6 @@ type Config struct {
 	// Providers LLM 提供商配置，包含各种 AI 模型服务商的认证信息
 	// `yaml:"providers"` 表示此字段对应 YAML 文件中的 "providers" 键
 	Providers ProvidersConfig `yaml:"providers"`
-
-	// Gateway 网关配置，定义 HTTP 服务的监听地址和端口
-	// `yaml:"gateway"` 表示此字段对应 YAML 文件中的 "gateway" 键
-	Gateway GatewayConfig `yaml:"gateway"`
 
 	// Tools 工具配置，包含各种工具的设置（如网络搜索、命令执行等）
 	// `yaml:"tools"` 表示此字段对应 YAML 文件中的 "tools" 键
@@ -77,64 +73,12 @@ type AgentDefaults struct {
 	MemoryWindow int `yaml:"memoryWindow"`
 }
 
-// ChannelsConfig 包含各种消息通道的配置
-// 支持多个消息平台，允许机器人通过不同渠道与用户交互
+// ChannelsConfig 包含消息通道的配置
+// 支持 Telegram 消息平台
 type ChannelsConfig struct {
-	// WhatsApp WhatsApp 消息平台配置
-	// `yaml:"whatsapp"` 表示此字段对应 YAML 文件中的 "whatsapp" 键
-	WhatsApp WhatsAppConfig `yaml:"whatsapp"`
-
 	// Telegram Telegram 消息平台配置
 	// `yaml:"telegram"` 表示此字段对应 YAML 文件中的 "telegram" 键
 	Telegram TelegramConfig `yaml:"telegram"`
-
-	// Discord Discord 消息平台配置
-	// `yaml:"discord"` 表示此字段对应 YAML 文件中的 "discord" 键
-	Discord DiscordConfig `yaml:"discord"`
-
-	// Feishu 飞书消息平台配置
-	// `yaml:"feishu"` 表示此字段对应 YAML 文件中的 "feishu" 键
-	Feishu FeishuConfig `yaml:"feishu"`
-
-	// Mochat 企业微信（Mochat）消息平台配置
-	// `yaml:"mochat"` 表示此字段对应 YAML 文件中的 "mochat" 键
-	Mochat MochatConfig `yaml:"mochat"`
-
-	// DingTalk 钉钉消息平台配置
-	// `yaml:"dingtalk"` 表示此字段对应 YAML 文件中的 "dingtalk" 键
-	DingTalk DingTalkConfig `yaml:"dingtalk"`
-
-	// Email 电子邮件通道配置
-	// `yaml:"email"` 表示此字段对应 YAML 文件中的 "email" 键
-	Email EmailConfig `yaml:"email"`
-
-	// Slack Slack 消息平台配置
-	// `yaml:"slack"` 表示此字段对应 YAML 文件中的 "slack" 键
-	Slack SlackConfig `yaml:"slack"`
-
-	// QQ QQ 消息平台配置
-	// `yaml:"qq"` 表示此字段对应 YAML 文件中的 "qq" 键
-	QQ QQConfig `yaml:"qq"`
-}
-
-// WhatsAppConfig 包含 WhatsApp 通道的配置
-// 用于连接和控制 WhatsApp 消息服务
-type WhatsAppConfig struct {
-	// Enabled 是否启用 WhatsApp 通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// BridgeURL WhatsApp 桥接服务的 URL 地址
-	// `yaml:"bridgeUrl"` 表示此字段对应 YAML 文件中的 "bridgeUrl" 键
-	BridgeURL string `yaml:"bridgeUrl"`
-
-	// BridgeToken 连接桥接服务的认证令牌
-	// `yaml:"bridgeToken"` 表示此字段对应 YAML 文件中的 "bridgeToken" 键
-	BridgeToken string `yaml:"bridgeToken"`
-
-	// AllowFrom 允许交互的用户白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
 }
 
 // TelegramConfig 包含 Telegram 通道的配置
@@ -161,289 +105,6 @@ type TelegramConfig struct {
 	// ReplyToMessage 是否以回复消息的方式响应
 	// `yaml:"replyToMessage"` 表示此字段对应 YAML 文件中的 "replyToMessage" 键
 	ReplyToMessage bool `yaml:"replyToMessage"`
-}
-
-// DiscordConfig 包含 Discord 通道的配置
-// 用于连接和控制 Discord 机器人服务
-type DiscordConfig struct {
-	// Enabled 是否启用 Discord 通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// Token Discord 机器人的认证令牌
-	// 从 Discord Developer Portal 获取
-	// `yaml:"token"` 表示此字段对应 YAML 文件中的 "token" 键
-	Token string `yaml:"token"`
-
-	// AllowFrom 允许交互的用户 ID 或服务器 ID 白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
-
-	// GatewayURL Discord 网关的 URL 地址（可选）
-	// `yaml:"gatewayUrl"` 表示此字段对应 YAML 文件中的 "gatewayUrl" 键
-	GatewayURL string `yaml:"gatewayUrl"`
-
-	// Intents Discord 网关意图标志
-	// 定义机器人需要接收的事件类型
-	// `yaml:"intents"` 表示此字段对应 YAML 文件中的 "intents" 键
-	Intents int `yaml:"intents"`
-}
-
-// FeishuConfig 包含飞书通道的配置
-// 用于连接和控制飞书（Lark）机器人服务
-type FeishuConfig struct {
-	// Enabled 是否启用飞书通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// AppID 飞书应用的唯一标识符
-	// `yaml:"appId"` 表示此字段对应 YAML 文件中的 "appId" 键
-	AppID string `yaml:"appId"`
-
-	// AppSecret 飞书应用的密钥
-	// 用于验证应用身份
-	// `yaml:"appSecret"` 表示此字段对应 YAML 文件中的 "appSecret" 键
-	AppSecret string `yaml:"appSecret"`
-
-	// EncryptKey 消息加密密钥
-	// 用于解密接收到的加密消息
-	// `yaml:"encryptKey"` 表示此字段对应 YAML 文件中的 "encryptKey" 键
-	EncryptKey string `yaml:"encryptKey"`
-
-	// VerificationToken 验证令牌
-	// 用于验证事件请求的来源
-	// `yaml:"verificationToken"` 表示此字段对应 YAML 文件中的 "verificationToken" 键
-	VerificationToken string `yaml:"verificationToken"`
-
-	// AllowFrom 允许交互的用户 ID 白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
-}
-
-// MochatConfig 包含企业微信（Mochat）通道的配置
-// 用于连接和控制企业微信机器人服务
-type MochatConfig struct {
-	// Enabled 是否启用 Mochat 通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// BaseURL Mochat API 的基础 URL 地址
-	// `yaml:"baseUrl"` 表示此字段对应 YAML 文件中的 "baseUrl" 键
-	BaseURL string `yaml:"baseUrl"`
-
-	// SocketURL WebSocket 连接的 URL 地址
-	// `yaml:"socketUrl"` 表示此字段对应 YAML 文件中的 "socketUrl" 键
-	SocketURL string `yaml:"socketUrl"`
-
-	// SocketPath WebSocket 连接的路径
-	// `yaml:"socketPath"` 表示此字段对应 YAML 文件中的 "socketPath" 键
-	SocketPath string `yaml:"socketPath"`
-
-	// ClawToken 认证令牌
-	// `yaml:"clawToken"` 表示此字段对应 YAML 文件中的 "clawToken" 键
-	ClawToken string `yaml:"clawToken"`
-
-	// AgentUserID 代理用户的唯一标识符
-	// `yaml:"agentUserId"` 表示此字段对应 YAML 文件中的 "agentUserId" 键
-	AgentUserID string `yaml:"agentUserId"`
-
-	// Sessions 会话 ID 列表
-	// `yaml:"sessions"` 表示此字段对应 YAML 文件中的 "sessions" 键
-	Sessions []string `yaml:"sessions"`
-
-	// AllowFrom 允许交互的用户白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
-}
-
-// DingTalkConfig 包含钉钉通道的配置
-// 用于连接和控制钉钉机器人服务
-type DingTalkConfig struct {
-	// Enabled 是否启用钉钉通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// ClientID 钉钉应用的客户端 ID
-	// `yaml:"clientId"` 表示此字段对应 YAML 文件中的 "clientId" 键
-	ClientID string `yaml:"clientId"`
-
-	// ClientSecret 钉钉应用的客户端密钥
-	// 用于身份验证
-	// `yaml:"clientSecret"` 表示此字段对应 YAML 文件中的 "clientSecret" 键
-	ClientSecret string `yaml:"clientSecret"`
-
-	// AllowFrom 允许交互的用户 ID 白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
-}
-
-// EmailConfig 包含电子邮件通道的配置
-// 用于通过电子邮件与机器人交互
-type EmailConfig struct {
-	// Enabled 是否启用电子邮件通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// ConsentGranted 用户是否已授予邮件访问权限
-	// `yaml:"consentGranted"` 表示此字段对应 YAML 文件中的 "consentGranted" 键
-	ConsentGranted bool `yaml:"consentGranted"`
-
-	// IMAPHost IMAP 服务器的主机地址
-	// 用于接收邮件
-	// `yaml:"imapHost"` 表示此字段对应 YAML 文件中的 "imapHost" 键
-	IMAPHost string `yaml:"imapHost"`
-
-	// IMAPPort IMAP 服务器的端口号
-	// `yaml:"imapPort"` 表示此字段对应 YAML 文件中的 "imapPort" 键
-	IMAPPort int `yaml:"imapPort"`
-
-	// IMAPUsername IMAP 登录用户名
-	// `yaml:"imapUsername"` 表示此字段对应 YAML 文件中的 "imapUsername" 键
-	IMAPUsername string `yaml:"imapUsername"`
-
-	// IMAPPassword IMAP 登录密码
-	// `yaml:"imapPassword"` 表示此字段对应 YAML 文件中的 "imapPassword" 键
-	IMAPPassword string `yaml:"imapPassword"`
-
-	// IMAPMailbox IMAP 邮箱名称
-	// 通常为 "INBOX"
-	// `yaml:"imapMailbox"` 表示此字段对应 YAML 文件中的 "imapMailbox" 键
-	IMAPMailbox string `yaml:"imapMailbox"`
-
-	// IMAPUseSSL 是否使用 SSL 连接 IMAP 服务器
-	// `yaml:"imapUseSSL"` 表示此字段对应 YAML 文件中的 "imapUseSSL" 键
-	IMAPUseSSL bool `yaml:"imapUseSSL"`
-
-	// SMTPHost SMTP 服务器的主机地址
-	// 用于发送邮件
-	// `yaml:"smtpHost"` 表示此字段对应 YAML 文件中的 "smtpHost" 键
-	SMTPHost string `yaml:"smtpHost"`
-
-	// SMTPPort SMTP 服务器的端口号
-	// `yaml:"smtpPort"` 表示此字段对应 YAML 文件中的 "smtpPort" 键
-	SMTPPort int `yaml:"smtpPort"`
-
-	// SMTPUsername SMTP 登录用户名
-	// `yaml:"smtpUsername"` 表示此字段对应 YAML 文件中的 "smtpUsername" 键
-	SMTPUsername string `yaml:"smtpUsername"`
-
-	// SMTPPassword SMTP 登录密码
-	// `yaml:"smtpPassword"` 表示此字段对应 YAML 文件中的 "smtpPassword" 键
-	SMTPPassword string `yaml:"smtpPassword"`
-
-	// SMTPUseTLS 是否使用 TLS 加密连接 SMTP 服务器
-	// `yaml:"smtpUseTLS"` 表示此字段对应 YAML 文件中的 "smtpUseTLS" 键
-	SMTPUseTLS bool `yaml:"smtpUseTLS"`
-
-	// SMTPUseSSL 是否使用 SSL 连接 SMTP 服务器
-	// `yaml:"smtpUseSSL"` 表示此字段对应 YAML 文件中的 "smtpUseSSL" 键
-	SMTPUseSSL bool `yaml:"smtpUseSSL"`
-
-	// FromAddress 发件人邮箱地址
-	// `yaml:"fromAddress"` 表示此字段对应 YAML 文件中的 "fromAddress" 键
-	FromAddress string `yaml:"fromAddress"`
-
-	// AutoReplyEnabled 是否启用自动回复
-	// `yaml:"autoReplyEnabled"` 表示此字段对应 YAML 文件中的 "autoReplyEnabled" 键
-	AutoReplyEnabled bool `yaml:"autoReplyEnabled"`
-
-	// PollIntervalSeconds 轮询新邮件的时间间隔（秒）
-	// `yaml:"pollIntervalSeconds"` 表示此字段对应 YAML 文件中的 "pollIntervalSeconds" 键
-	PollIntervalSeconds int `yaml:"pollIntervalSeconds"`
-
-	// MarkSeen 是否将处理过的邮件标记为已读
-	// `yaml:"markSeen"` 表示此字段对应 YAML 文件中的 "markSeen" 键
-	MarkSeen bool `yaml:"markSeen"`
-
-	// MaxBodyChars 邮件正文的最大字符数
-	// 超过此限制的内容将被截断
-	// `yaml:"maxBodyChars"` 表示此字段对应 YAML 文件中的 "maxBodyChars" 键
-	MaxBodyChars int `yaml:"maxBodyChars"`
-
-	// SubjectPrefix 回复邮件的主题前缀
-	// `yaml:"subjectPrefix"` 表示此字段对应 YAML 文件中的 "subjectPrefix" 键
-	SubjectPrefix string `yaml:"subjectPrefix"`
-
-	// AllowFrom 允许交互的发件人邮箱白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
-}
-
-// SlackConfig 包含 Slack 通道的配置
-// 用于连接和控制 Slack 机器人服务
-type SlackConfig struct {
-	// Enabled 是否启用 Slack 通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// Mode Slack 集成模式
-	// 可能的值："webhook"、"socket" 等
-	// `yaml:"mode"` 表示此字段对应 YAML 文件中的 "mode" 键
-	Mode string `yaml:"mode"`
-
-	// WebhookPath Webhook 的 URL 路径
-	// `yaml:"webhookPath"` 表示此字段对应 YAML 文件中的 "webhookPath" 键
-	WebhookPath string `yaml:"webhookPath"`
-
-	// BotToken Slack 机器人的认证令牌
-	// 以 "xoxb-" 开头的令牌
-	// `yaml:"botToken"` 表示此字段对应 YAML 文件中的 "botToken" 键
-	BotToken string `yaml:"botToken"`
-
-	// AppToken Slack 应用级别的令牌
-	// 用于 Socket Mode，以 "xapp-" 开头
-	// `yaml:"appToken"` 表示此字段对应 YAML 文件中的 "appToken" 键
-	AppToken string `yaml:"appToken"`
-
-	// ReplyInThread 是否在消息线程中回复
-	// `yaml:"replyInThread"` 表示此字段对应 YAML 文件中的 "replyInThread" 键
-	ReplyInThread bool `yaml:"replyInThread"`
-
-	// ReactEmoji 机器人处理消息时添加的表情符号
-	// `yaml:"reactEmoji"` 表示此字段对应 YAML 文件中的 "reactEmoji" 键
-	ReactEmoji string `yaml:"reactEmoji"`
-
-	// DM 私信（Direct Message）相关配置
-	// `yaml:"dm"` 表示此字段对应 YAML 文件中的 "dm" 键
-	DM SlackDMConfig `yaml:"dm"`
-}
-
-// SlackDMConfig 包含 Slack 私信的配置
-// 控制机器人如何处理私信消息
-type SlackDMConfig struct {
-	// Enabled 是否启用私信功能
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// Policy 私信处理策略
-	// 可能的值："all"（所有人）、"whitelist"（白名单）等
-	// `yaml:"policy"` 表示此字段对应 YAML 文件中的 "policy" 键
-	Policy string `yaml:"policy"`
-
-	// AllowFrom 允许私信的用户 ID 白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
-}
-
-// QQConfig 包含 QQ 通道的配置
-// 用于连接和控制 QQ 机器人服务
-type QQConfig struct {
-	// Enabled 是否启用 QQ 通道
-	// `yaml:"enabled"` 表示此字段对应 YAML 文件中的 "enabled" 键
-	Enabled bool `yaml:"enabled"`
-
-	// AppID QQ 开放平台的应用 ID
-	// `yaml:"appId"` 表示此字段对应 YAML 文件中的 "appId" 键
-	AppID string `yaml:"appId"`
-
-	// Secret QQ 应用的密钥
-	// 用于身份验证
-	// `yaml:"secret"` 表示此字段对应 YAML 文件中的 "secret" 键
-	Secret string `yaml:"secret"`
-
-	// AllowFrom 允许交互的用户 ID 白名单列表
-	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
-	AllowFrom []string `yaml:"allowFrom"`
 }
 
 // ProvidersConfig 包含各种 LLM（大语言模型）提供商的配置
@@ -535,20 +196,6 @@ type ProviderConfig struct {
 	// 可以添加自定义的请求头，如特殊的认证信息或元数据
 	// `yaml:"extraHeaders"` 表示此字段对应 YAML 文件中的 "extraHeaders" 键
 	ExtraHeaders map[string]string `yaml:"extraHeaders"`
-}
-
-// GatewayConfig 包含网关的配置信息
-// 定义 HTTP 服务器的监听地址和端口
-type GatewayConfig struct {
-	// Host 服务器监听的主机地址
-	// 例如："0.0.0.0"（监听所有网络接口）或 "127.0.0.1"（仅本地访问）
-	// `yaml:"host"` 表示此字段对应 YAML 文件中的 "host" 键
-	Host string `yaml:"host"`
-
-	// Port 服务器监听的端口号
-	// 默认值为 18790
-	// `yaml:"port"` 表示此字段对应 YAML 文件中的 "port" 键
-	Port int `yaml:"port"`
 }
 
 // ToolsConfig 包含工具的配置信息
@@ -651,7 +298,7 @@ type MCPServerConfig struct {
 func Load(path string) (*Config, error) {
 	// 尝试展开用户主目录
 	// 如果路径以 "~/" 开头，将其替换为实际的用户主目录路径
-	if path[:2] == "~/" {
+	if len(path) >= 2 && path[0:2] == "~/" {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return nil, err
@@ -698,14 +345,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Agents.Defaults.MemoryWindow == 0 {
 		cfg.Agents.Defaults.MemoryWindow = 50
 	}
-	// 默认网关端口
-	if cfg.Gateway.Port == 0 {
-		cfg.Gateway.Port = 18790
-	}
-	// 默认网关监听地址
-	if cfg.Gateway.Host == "" {
-		cfg.Gateway.Host = "0.0.0.0"
-	}
 
 	return &cfg, nil
 }
@@ -722,7 +361,7 @@ func Load(path string) (*Config, error) {
 //	例如："~/.nanogrip/workspace" 会被展开为 "/home/username/.nanogrip/workspace"
 func (c *Config) GetWorkspacePath() string {
 	// 检查工作空间路径是否以 "~/" 开头
-	if c.Agents.Defaults.Workspace[:2] == "~/" {
+	if len(c.Agents.Defaults.Workspace) >= 2 && c.Agents.Defaults.Workspace[0:2] == "~/" {
 		// 获取用户主目录
 		home, err := os.UserHomeDir()
 		if err != nil {

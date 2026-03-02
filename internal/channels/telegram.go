@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -42,8 +43,9 @@ type TelegramChannel struct {
 	allowFrom    map[string]bool       // 用户白名单，key为用户ID，value始终为true
 	httpClient   *http.Client          // HTTP客户端，用于调用Telegram API
 	chatIDs      map[string]int64      // 用户ID到聊天ID的映射，用于回复消息
-	mu           sync.RWMutex          // 读写锁，保护chatIDs的并发访问
+	mu           sync.RWMutex          // 读写锁，保护chatIDs和updateID的并发访问
 	updateID     int64                  // 当前已处理的最大update_id，用于增量获取消息
+	updateIDMu   sync.Mutex            // 保护updateID的互斥锁
 	inputHandler func(channel, chatID, input string) bool // 输入处理回调，用于交互式输入
 }
 
@@ -288,9 +290,15 @@ func (c *TelegramChannel) sendPhotoByFile(chatID int64, filePath string, caption
 
 	// 展开 $HOME 和 ~ 路径
 	expandedPath := os.ExpandEnv(filePath)
-	if expandedPath != filePath {
-		filePath = expandedPath
+	// 处理 ~ 开头的路径
+	if strings.HasPrefix(filePath, "~/") {
+		homeDir, _ := os.UserHomeDir()
+		expandedPath = filepath.Join(homeDir, filePath[2:])
+	} else if filePath == "~" {
+		homeDir, _ := os.UserHomeDir()
+		expandedPath = homeDir
 	}
+	filePath = expandedPath
 
 	// 打开本地文件
 	file, err := os.Open(filePath)
@@ -406,8 +414,16 @@ func (c *TelegramChannel) pollUpdates(ctx context.Context) {
 
 			// 处理每条更新
 			for _, update := range updates {
-				if update.UpdateID >= c.updateID {
+				c.updateIDMu.Lock()
+				shouldProcess := update.UpdateID >= c.updateID
+				if shouldProcess {
+					// 更新 offset 为当前 update_id + 1
+					// 这样下次轮询会从这个 update 之后开始
 					c.updateID = update.UpdateID + 1
+				}
+				c.updateIDMu.Unlock()
+
+				if shouldProcess {
 					// 使用新的goroutine处理消息，避免阻塞轮询
 					go c.handleUpdate(update)
 				}
@@ -424,11 +440,15 @@ func (c *TelegramChannel) pollUpdates(ctx context.Context) {
 // 使用offset参数实现增量获取，避免重复接收消息
 // 返回: 更新列表和可能的错误
 func (c *TelegramChannel) getUpdates() ([]TelegramUpdate, error) {
+	c.updateIDMu.Lock()
+	offset := c.updateID
+	c.updateIDMu.Unlock()
+
 	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=60", c.token)
 
 	// 添加offset参数，只获取大于等于updateID的更新
-	if c.updateID > 0 {
-		apiURL += fmt.Sprintf("&offset=%d", c.updateID)
+	if offset > 0 {
+		apiURL += fmt.Sprintf("&offset=%d", offset)
 	}
 
 	// 创建新的HTTP请求（避免连接重用问题）
@@ -479,11 +499,14 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 	msg := update.Message
 
 	// 忽略空消息（既没有文本也没有图片说明也没有文档）
-	hasText := msg.Text != "" || msg.Caption != ""
+	// 注意：Caption 是媒体文件的说明，不应该算作纯文本消息
+	hasText := msg.Text != ""
 	hasPhoto := len(msg.Photo) > 0
 	hasDocument := msg.Document != nil
+	hasCaption := msg.Caption != ""
 
-	if !hasText && !hasPhoto && !hasDocument {
+	// 有内容（文本、图片、文档或图片说明）才继续处理
+	if !hasText && !hasPhoto && !hasDocument && !hasCaption {
 		return
 	}
 
@@ -516,7 +539,8 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 	// 检查是否有输入处理回调，并且消息是纯文本（不是图片或文档）
 	// 如果有交互式输入等待，将消息路由到输入处理器
 	chatIDStr := strconv.FormatInt(msg.Chat.ID, 10)
-	if c.inputHandler != nil && hasText && !hasPhoto && !hasDocument {
+	// 只有纯文本消息（没有媒体）才路由到输入处理器
+	if c.inputHandler != nil && hasText && !hasPhoto && !hasDocument && !hasCaption {
 		// 调用输入处理回调
 		if c.inputHandler("telegram", chatIDStr, content) {
 			// 输入已被处理，不发送到消息总线
