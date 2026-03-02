@@ -31,7 +31,7 @@ func NewSpawnTool(spawnFunc func(task string, label string, originChannel string
 	return &SpawnTool{
 		BaseTool: NewBaseTool(
 			"spawn",
-			"Spawn a subagent to run a task in the background. Use for long-running tasks. The subagent will notify you when complete.",
+			"Spawn a subagent to run a task in the background. The subagent runs independently and will notify you when complete.\n\n**WHEN TO USE SPAWN:**\n• Tasks taking >2 minutes (large file processing, web scraping, batch operations)\n• Parallel independent tasks (multiple searches, concurrent file operations)\n• Long-running monitoring or polling tasks\n• Tasks where you want to continue working while it completes\n\n**WHEN NOT TO USE:**\n• Quick queries (<30 seconds) - just do them directly\n• Simple file reads/writes - use read/write tools directly\n• Tasks that depend on each other - run sequentially instead\n\n**USAGE:**\n{\"task\": \"your specific task description\", \"label\": \"optional readable name\"}",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

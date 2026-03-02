@@ -415,6 +415,17 @@ func runAgent(configPath, message string) {
 	// 【关键修复】创建共享的消息总线，用于 AgentLoop 和子代理通信
 	msgBus := bus.New(10)
 
+	// 获取内置技能路径（与 AgentLoop 相同的逻辑）
+	var builtinSkills string
+	builtinSkills = filepath.Join(workspace, "..", "skills")
+	if _, err := os.Stat(builtinSkills); os.IsNotExist(err) {
+		builtinSkills = "/workspace/nanogrip/skills"
+		if _, err := os.Stat(builtinSkills); os.IsNotExist(err) {
+			builtinSkills = "skills"
+		}
+	}
+	log.Printf("Loading built-in skills from: %s", builtinSkills)
+
 	// 创建子代理管理器（使用共享的消息总线）
 	subagentManager := agent.NewSubagentManager(
 		provider,
@@ -425,6 +436,7 @@ func runAgent(configPath, message string) {
 		cfg.Agents.Defaults.MaxTokens,
 		cfg.Agents.Defaults.MaxToolIterations,
 		toolRegistry,
+		builtinSkills,
 	)
 
 	// 注册子代理生成工具
@@ -729,6 +741,17 @@ func runGateway(configPath string) {
 	messageChan := make(chan string, 100)
 	toolRegistry.Register(tools.NewMessageTool(messageChan))
 
+	// 获取内置技能路径（与 AgentLoop 相同的逻辑）
+	var builtinSkills string
+	builtinSkills = filepath.Join(workspace, "..", "skills")
+	if _, err := os.Stat(builtinSkills); os.IsNotExist(err) {
+		builtinSkills = "/workspace/nanogrip/skills"
+		if _, err := os.Stat(builtinSkills); os.IsNotExist(err) {
+			builtinSkills = "skills"
+		}
+	}
+	log.Printf("[Gateway] Loading built-in skills from: %s", builtinSkills)
+
 	// 创建子代理管理器
 	subagentManager := agent.NewSubagentManager(
 		provider,
@@ -739,6 +762,7 @@ func runGateway(configPath string) {
 		cfg.Agents.Defaults.MaxTokens,
 		cfg.Agents.Defaults.MaxToolIterations,
 		toolRegistry,
+		builtinSkills,
 	)
 
 	// 注册子代理生成工具

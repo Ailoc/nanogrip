@@ -24,11 +24,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/Ailoc/nanogrip/internal/bus"
 	"github.com/Ailoc/nanogrip/internal/providers"
+	"github.com/Ailoc/nanogrip/internal/skills"
 	"github.com/Ailoc/nanogrip/internal/tools"
 )
 
@@ -43,6 +45,7 @@ type SubagentManager struct {
 	maxTokens         int                      // 最大令牌数
 	maxIterations     int                      // 最大迭代次数
 	toolRegistry      *tools.ToolRegistry      // 工具注册表
+	skillsLoader      *skills.SkillsLoader     // 技能加载器
 	runningTasks      map[string]*subagentTask // 正在运行的任务映射
 	runningTasksMutex sync.Mutex               // 任务映射的互斥锁
 }
@@ -73,7 +76,9 @@ func NewSubagentManager(
 	maxTokens int,
 	maxIterations int,
 	toolRegistry *tools.ToolRegistry,
+	builtinSkills string,
 ) *SubagentManager {
+	skillsLoader := skills.NewSkillsLoader(workspace, builtinSkills)
 	return &SubagentManager{
 		provider:      provider,
 		workspace:     workspace,
@@ -83,6 +88,7 @@ func NewSubagentManager(
 		maxTokens:     maxTokens,
 		maxIterations: maxIterations,
 		toolRegistry:  toolRegistry,
+		skillsLoader:  skillsLoader,
 		runningTasks:  make(map[string]*subagentTask),
 	}
 }
@@ -157,7 +163,7 @@ func (s *SubagentManager) runSubagent(
 	log.Printf("Subagent [%s] starting task: %s", taskID, label)
 
 	// 构建子代理的消息（使用专用的系统提示词）
-	systemPrompt := s.buildSubagentPrompt(task)
+	systemPrompt := s.buildSubagentPrompt(task, taskID)
 	messages := []map[string]interface{}{
 		{"role": "system", "content": systemPrompt},
 		{"role": "user", "content": task},
@@ -172,10 +178,58 @@ func (s *SubagentManager) runSubagent(
 		for i, m := range messages {
 			role, _ := m["role"].(string)
 			content, _ := m["content"].(string)
-			providerMessages[i] = providers.Message{
+			msg := providers.Message{
 				Role:    role,
 				Content: content,
 			}
+
+			// 处理 assistant 消息中的 tool_calls 字段
+			if role == "assistant" {
+				if toolCalls, ok := m["tool_calls"].([]interface{}); ok && len(toolCalls) > 0 {
+					tools := make([]providers.ToolCallRequest, len(toolCalls))
+					for j, tcInterface := range toolCalls {
+						if tc, ok := tcInterface.(map[string]interface{}); ok {
+							id, _ := tc["id"].(string)
+							var name string
+							var argsStr string
+
+							// function 字段可能是 map[string]interface{} 或 map[string]string
+							if fn, ok := tc["function"].(map[string]interface{}); ok {
+								name, _ = fn["name"].(string)
+								argsStr, _ = fn["arguments"].(string)
+							} else if fn, ok := tc["function"].(map[string]string); ok {
+								name = fn["name"]
+								argsStr = fn["arguments"]
+							}
+
+							// 解析 arguments JSON 字符串为 map[string]interface{}
+							var argsMap map[string]interface{}
+							if argsStr != "" {
+								json.Unmarshal([]byte(argsStr), &argsMap)
+							}
+
+							tools[j] = providers.ToolCallRequest{
+								ID:        id,
+								Name:      name,
+								Arguments: argsMap,
+							}
+						}
+					}
+					msg.Tools = tools
+				}
+			}
+
+			// 处理 tool 消息中的 tool_call_id 和 name 字段
+			if role == "tool" {
+				if toolCallID, ok := m["tool_call_id"].(string); ok {
+					msg.ToolCallID = toolCallID
+				}
+				if name, ok := m["name"].(string); ok {
+					msg.Name = name
+				}
+			}
+
+			providerMessages[i] = msg
 		}
 
 		// 获取工具定义
@@ -273,15 +327,15 @@ func (s *SubagentManager) announceResult(
 	}
 
 	// 构建结果通知消息
-	// 这个消息会被主 Agent 接收，然后主 Agent 会将其转化为用户友好的响应
-	announceContent := fmt.Sprintf(`[Subagent '%s' %s]
+	// 子代理只向主 agent 报告任务执行结果，由主 agent 决定如何响应用户
+	announceContent := fmt.Sprintf(`[Subagent Task Report]
+Label: %s
+Status: %s
 
 Task: %s
 
 Result:
-%s
-
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs.`, label, statusText, task, result)
+%s`, label, statusText, task, result)
 
 	// 通过消息总线发送结果
 	msg := bus.InboundMessage{
@@ -301,12 +355,15 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 // 子代理的提示词更简洁、更专注：
 // - 强调完成特定任务
 // - 明确限制（不能发送消息、不能创建子代理）
-// - 简化的工作空间信息
-func (s *SubagentManager) buildSubagentPrompt(task string) string {
+// - 独立的子工作空间，避免与主代理或其他子代理冲突
+// - 完成后报告生成的文件路径
+func (s *SubagentManager) buildSubagentPrompt(task string, taskID string) string {
 	now := time.Now().Format("2006-01-02 15:04 (Monday)")
 	tz := time.Now().Format("MST")
+	subworkspace := filepath.Join(s.workspace, "subworkspace", taskID)
 
-	return fmt.Sprintf(`# Subagent
+	// 构建基础提示词
+	prompt := fmt.Sprintf(`# Subagent
 
 ## Current Time
 %s (%s)
@@ -331,10 +388,50 @@ You are a subagent spawned by the main agent to complete a specific task.
 - Access the main agent's conversation history
 
 ## Workspace
-Your workspace is at: %s
-Skills are available at: %s/skills/ (read SKILL.md files as needed)
+Main workspace: %s
+`, now, tz, s.workspace)
 
-When you have completed the task, provide a clear summary of your findings or actions.`, now, tz, s.workspace, s.workspace)
+	// 添加技能摘要（与主代理相同的方式）
+	skillsSummary := s.skillsLoader.BuildSkillsSummary()
+	if skillsSummary != "" {
+		prompt += `# Skills
+
+The following skills extend your capabilities. To use a skill, read its SKILL.md file using the filesystem tool with the path shown in the <location> tag below.
+
+Example: filesystem(operation="read", path="/workspace/nanogrip/skills/agent-browser/SKILL.md")
+
+Skills with available="false" need dependencies installed first - you can try installing them with apt/brew.
+
+` + skillsSummary + "\n\n"
+	}
+
+	// 添加子工作空间和任务完成报告部分
+	prompt += fmt.Sprintf(`## Your Temporary Workspace
+**IMPORTANT**: All working files MUST be saved in your dedicated subworkspace:
+%s
+
+When creating files, use the path "subworkspace/%s/filename" (relative path).
+- This subworkspace is created automatically when you first write to it
+- Keeping files here prevents conflicts with the main agent and other subagents
+- The main agent can access these files after you complete
+
+## Task Completion Report
+When you finish your task, you MUST include:
+1. A clear summary of what you did
+2. Full paths to any files you created (report the absolute path so main agent can find them)
+3. Any important findings or results
+
+Example final response:
+"Completed analysis. Generated 3 files:
+- File: %s/results.json (analysis data)
+- File: %s/report.md (detailed report)
+- File: %s/data.csv (extracted data)
+
+Summary: [brief description]"
+
+Now execute your task.`, subworkspace, taskID, subworkspace, subworkspace, subworkspace)
+
+	return prompt
 }
 
 // GetRunningCount 返回正在运行的子代理数量
