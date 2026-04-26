@@ -13,6 +13,7 @@ package bus
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -61,11 +62,14 @@ type OutboundMessage struct {
 // - context 用于协调多个 goroutine 的生命周期
 // - sync.WaitGroup 用于等待所有后台任务完成
 type MessageBus struct {
-	inbound  chan InboundMessage  // 入站消息通道:存储从通道适配器到智能体的消息
-	outbound chan OutboundMessage // 出站消息通道:存储从智能体到通道适配器的消息
-	ctx      context.Context      // 上下文对象,用于控制消息总线的生命周期
-	cancel   context.CancelFunc   // 取消函数,用于触发消息总线的关闭流程
-	wg       sync.WaitGroup       // 等待组,用于等待所有后台 goroutine 完成
+	inbound   chan InboundMessage  // 入站消息通道:存储从通道适配器到智能体的消息
+	outbound  chan OutboundMessage // 出站消息通道:存储从智能体到通道适配器的消息
+	ctx       context.Context      // 上下文对象,用于控制消息总线的生命周期
+	cancel    context.CancelFunc   // 取消函数,用于触发消息总线的关闭流程
+	wg        sync.WaitGroup       // 等待组,用于等待所有后台 goroutine 完成
+	mu        sync.RWMutex         // 保护关闭与发布之间的边界
+	closeOnce sync.Once            // 确保关闭流程只执行一次
+	closed    atomic.Bool          // 是否已关闭
 }
 
 // New 创建并返回一个新的 MessageBus 实例。
@@ -121,11 +125,18 @@ func New(bufferSize int) *MessageBus {
 // - 这是一个非阻塞操作,不会因为缓冲区满而永久等待
 // - 调用者应该处理 ErrBusFull 错误,可以选择重试或丢弃消息
 func (b *MessageBus) PublishInbound(msg InboundMessage) error {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.closed.Load() {
+		return context.Canceled
+	}
+
 	select {
-	case b.inbound <- msg:
-		return nil
 	case <-b.ctx.Done():
 		return b.ctx.Err()
+	case b.inbound <- msg:
+		return nil
 	default:
 		return ErrBusFull
 	}
@@ -160,6 +171,8 @@ func (b *MessageBus) ConsumeInbound(ctx context.Context) (InboundMessage, error)
 	select {
 	case msg := <-b.inbound:
 		return msg, nil
+	case <-b.ctx.Done():
+		return InboundMessage{}, b.ctx.Err()
 	case <-ctx.Done():
 		return InboundMessage{}, ctx.Err()
 	}
@@ -192,11 +205,18 @@ func (b *MessageBus) ConsumeInbound(ctx context.Context) (InboundMessage, error)
 // - 智能体处理完入站消息后,通过此方法发送响应
 // - 响应会被放入出站队列,等待相应的通道适配器消费并发送
 func (b *MessageBus) PublishOutbound(msg OutboundMessage) error {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.closed.Load() {
+		return context.Canceled
+	}
+
 	select {
-	case b.outbound <- msg:
-		return nil
 	case <-b.ctx.Done():
 		return b.ctx.Err()
+	case b.outbound <- msg:
+		return nil
 	default:
 		return ErrBusFull
 	}
@@ -230,6 +250,8 @@ func (b *MessageBus) ConsumeOutbound(ctx context.Context) (OutboundMessage, erro
 	select {
 	case msg := <-b.outbound:
 		return msg, nil
+	case <-b.ctx.Done():
+		return OutboundMessage{}, b.ctx.Err()
 	case <-ctx.Done():
 		return OutboundMessage{}, ctx.Err()
 	}
@@ -281,20 +303,23 @@ func (b *MessageBus) OutboundSize() int {
 // 2. 等待所有后台 goroutine 完成(通过 sync.WaitGroup)
 //   - 确保所有正在处理的任务都已完成
 //
-// 3. 关闭 inbound 和 outbound 通道
-//   - 关闭 channel 后,任何尝试发送到这些 channel 的操作都会 panic
-//   - 但从已关闭的 channel 接收消息是安全的,会返回零值和 false
+// 3. 保留 inbound 和 outbound 通道不关闭
+//   - Close 与生产者并发时关闭 channel 会导致 send panic
+//   - 关闭后发布方法通过上下文返回取消错误
 //
 // 注意事项:
 // - Close() 应该只被调用一次,通常在程序退出时调用
 // - 调用 Close() 后不应再使用此 MessageBus 实例
-// - 关闭操作是幂等的,多次调用不会造成问题(但第二次调用会 panic,因为 channel 已关闭)
+// - 关闭操作是幂等的,多次调用不会造成问题
 // - 确保在关闭前停止所有生产者和消费者的创建
 func (b *MessageBus) Close() {
-	b.cancel()        // 触发 context 取消,通知所有正在等待的操作
-	b.wg.Wait()       // 等待所有后台 goroutine 完成
-	close(b.inbound)  // 关闭入站通道
-	close(b.outbound) // 关闭出站通道
+	b.closeOnce.Do(func() {
+		b.mu.Lock()
+		b.closed.Store(true)
+		b.cancel() // 触发 context 取消,通知所有正在等待的操作
+		b.mu.Unlock()
+		b.wg.Wait() // 等待所有后台 goroutine 完成
+	})
 }
 
 // ErrBusFull 是当消息总线的缓冲区已满时返回的错误。

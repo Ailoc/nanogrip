@@ -49,6 +49,9 @@ import (
 // AgentExecutor 定义 Agent 执行器接口
 // 用于在定时任务到期时触发 Agent 执行命令
 type AgentExecutor interface {
+	// ProcessDirectWithContext 直接在指定 Channel 和 ChatID 下处理命令
+	ProcessDirectWithContext(ctx context.Context, channel, chatID, message string) (string, error)
+
 	// ProcessDirect 直接处理命令并返回结果
 	ProcessDirect(ctx context.Context, message string) (string, error)
 
@@ -70,8 +73,8 @@ type Job struct {
 	NextRun        time.Time // 下次执行时间（堆排序的关键字段）
 
 	// Agent 模式支持（方案4）
-	TriggerAgent  bool   // 是否触发 Agent 执行（true=执行命令, false=发送固定消息）
-	AgentCommand  string // Agent 要执行的命令内容
+	TriggerAgent bool   // 是否触发 Agent 执行（true=执行命令, false=发送固定消息）
+	AgentCommand string // Agent 要执行的命令内容
 }
 
 // Schedule 表示任务的调度配置
@@ -92,18 +95,19 @@ type Schedule struct {
 //  4. 任务执行通过回调函数 runner 进行
 //  5. 支持 Agent 模式：可通过 AgentExecutor 触发 AI 执行复杂任务
 type CronService struct {
-	jobs     map[string]*Job // 任务 map，键为任务 ID，用于快速查找
-	heap     *jobHeap        // 最小堆，按 NextRun 时间排序任务
-	mu       sync.RWMutex    // 读写锁，保护 jobs 和 heap
-	runner   func(job *Job)  // 任务执行回调函数（兼容旧版，优先使用 agentExecutor）
+	jobs   map[string]*Job // 任务 map，键为任务 ID，用于快速查找
+	heap   *jobHeap        // 最小堆，按 NextRun 时间排序任务
+	mu     sync.RWMutex    // 读写锁，保护 jobs 和 heap
+	runner func(job *Job)  // 任务执行回调函数（兼容旧版，优先使用 agentExecutor）
 
 	// Agent 模式支持
-	agentExecutor AgentExecutor  // Agent 执行器，用于触发 AI 命令执行
+	agentExecutor AgentExecutor   // Agent 执行器，用于触发 AI 命令执行
 	messageBus    *bus.MessageBus // 消息总线，用于发送消息结果（使用具体类型以匹配接口）
 
-	stopChan chan struct{}   // 停止信号通道
-	stopOnce sync.Once       // 确保 Stop 只执行一次
-	wg       sync.WaitGroup  // 等待组，用于跟踪调度 goroutine
+	stopChan   chan struct{}  // 停止信号通道
+	wakeupChan chan struct{}  // 新任务/任务变更唤醒通道
+	stopOnce   sync.Once      // 确保 Stop 只执行一次
+	wg         sync.WaitGroup // 等待组，用于跟踪调度 goroutine
 }
 
 // 移除之前的 MessageBus 接口定义，直接使用 bus.MessageBus
@@ -169,16 +173,25 @@ func (h *jobHeap) Pop() interface{} {
 //
 // 参数：
 //   - runner: 任务执行回调函数（可选，用于兼容旧版）
-//            如果设置了 AgentExecutor，runner 将被忽略
+//     如果设置了 AgentExecutor，runner 将被忽略
 //
 // 返回：
 //   - *CronService: 任务服务实例
 func NewCronService(runner func(job *Job)) *CronService {
 	return &CronService{
-		jobs:     make(map[string]*Job),
-		heap:     &jobHeap{},
-		runner:   runner,
-		stopChan: make(chan struct{}),
+		jobs:       make(map[string]*Job),
+		heap:       &jobHeap{},
+		runner:     runner,
+		stopChan:   make(chan struct{}),
+		wakeupChan: make(chan struct{}, 1),
+	}
+}
+
+// wakeup notifies the scheduler that job timing may have changed.
+func (c *CronService) wakeup() {
+	select {
+	case c.wakeupChan <- struct{}{}:
+	default:
 	}
 }
 
@@ -270,6 +283,7 @@ func (c *CronService) AddJob(job *Job) *Job {
 
 	c.jobs[job.ID] = job
 	heap.Push(c.heap, &jobHeapItem{job: job, index: len(*c.heap)}) // 插入堆，O(log n)
+	c.wakeup()
 
 	return job
 }
@@ -335,15 +349,10 @@ func (c *CronService) executeAgentJob(job *Job) {
 		return
 	}
 
-	// 【关键修复】在执行 Agent 前，设置工具上下文
-	// 这样 Agent 调用 cron 工具添加子任务时，会使用正确的 Channel 和 ChatID
-	executor.SetToolContext(job.Channel, job.To)
-	log.Printf("[Cron] ✓ 已设置工具上下文: Channel=%s, ChatID=%s", job.Channel, job.To)
-
 	// 调用 Agent 执行命令
 	log.Printf("[Cron] 🔄 准备调用 ProcessDirect...")
 	ctx := context.Background()
-	response, err := executor.ProcessDirect(ctx, job.AgentCommand)
+	response, err := executor.ProcessDirectWithContext(ctx, job.Channel, job.To, job.AgentCommand)
 	log.Printf("[Cron] 🔄 ProcessDirect 返回: response长度=%d, err=%v", len(response), err)
 
 	if err != nil {
@@ -377,9 +386,9 @@ func (c *CronService) sendResult(msgBus *bus.MessageBus, job *Job, content strin
 
 	// 使用 bus 包定义的 OutboundMessage 结构
 	msg := bus.OutboundMessage{
-		Channel:  job.Channel,
-		ChatID:   job.To,
-		Content:  content,
+		Channel: job.Channel,
+		ChatID:  job.To,
+		Content: content,
 		Metadata: map[string]interface{}{
 			"from_cron": true, // 标记消息来自 cron
 		},
@@ -444,12 +453,14 @@ func (c *CronService) RemoveJob(id string) bool {
 			// 时间复杂度：O(log n)
 			heap.Remove(c.heap, i)
 			log.Printf("[Cron] ✓ 任务已删除: %s", id)
+			c.wakeup()
 			return true
 		}
 	}
 
 	// 如果在堆中未找到，可能已经被执行并清理
 	log.Printf("[Cron] ⚠ 警告：任务 %s 在 map 中存在但不在堆中", id)
+	c.wakeup()
 	return true
 }
 
@@ -565,12 +576,11 @@ func (c *CronService) runLoop() {
 		c.mu.RUnlock()
 
 		if !hasJobs {
-			// 没有任务时，睡眠较长时间（1分钟）以响应新任务
-			// 这样可以避免频繁唤醒，同时保持对新任务的响应性
+			// 没有任务时阻塞等待停止或新任务唤醒
 			select {
 			case <-c.stopChan:
 				return
-			case <-time.After(60 * time.Second):
+			case <-c.wakeupChan:
 				// 唤醒后继续循环，检查是否有新任务
 				continue
 			}
@@ -580,17 +590,12 @@ func (c *CronService) runLoop() {
 		waitDuration := c.getNextWaitDuration()
 
 		if waitDuration > 0 {
-			// 【性能优化】分批等待以避免错过新添加的任务
-			// 最长等待 10 秒，确保新任务最多延迟 10 秒就被检查
-			maxWait := waitDuration
-			if maxWait > 10*time.Second {
-				maxWait = 10 * time.Second
-			}
-
 			select {
 			case <-c.stopChan:
 				return
-			case <-time.After(maxWait):
+			case <-c.wakeupChan:
+				continue
+			case <-time.After(waitDuration):
 				// 等待时间到，检查并执行任务
 				c.checkAndRun()
 			}

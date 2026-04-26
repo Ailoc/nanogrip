@@ -14,7 +14,6 @@ package agent
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -181,13 +180,7 @@ func (cb *ContextBuilder) buildSystemPrompt() string {
 
 	// 2. Available skills: 只显示摘要
 	skillsSummary := cb.skills.BuildSkillsSummary()
-	log.Printf("Skills summary length: %d", len(skillsSummary))
 	if skillsSummary != "" {
-		if len(skillsSummary) > 200 {
-			log.Printf("Skills found: %s...", skillsSummary[:200])
-		} else {
-			log.Printf("Skills found: %s", skillsSummary)
-		}
 		skillsSection := `# Skills
 
 The following skills extend your capabilities. To use a skill, read its SKILL.md file using the filesystem tool with the path shown in the <location> tag below.
@@ -308,12 +301,15 @@ You MUST classify EVERY user request:
 
 **Complete Workflow for "Generate Image and Send":**
 
-1. Create project: todo(operation="create_project", project_name="Generate Heart Image")
-2. Add todo: todo(operation="add_todo", project_id="[ID]", content="Write Python script", priority="high")
-3. Add todo: todo(operation="add_todo", project_id="[ID]", content="Run script to generate image", priority="high")
-4. Add todo: todo(operation="add_todo", project_id="[ID]", content="Send image to user", priority="high")
+1. Create project and todos in one call:
+   todo(operation="add_todos", project_name="Generate Heart Image", todos=[
+     {"content":"Write Python script", "priority":"high"},
+     {"content":"Run script to generate image", "priority":"high"},
+     {"content":"Send image to user", "priority":"high"}
+   ])
+   The result contains project_id and todo_ids. Use them in later update_todo calls.
 
-5. **Execute each step in order:**
+2. **Execute each step in order:**
    - Update to in_progress: todo(operation="update_todo", project_id="[ID]", todo_id="[todo_id]", status="in_progress")
    - Execute: filesystem(operation="write", path="script.py", content="...")
    - Update to completed: todo(operation="update_todo", project_id="[ID]", todo_id="[todo_id]", status="completed")
@@ -327,7 +323,7 @@ You MUST classify EVERY user request:
    - Execute: message(content="Here is your image", media="image.png", media_type="photo")
    - Update to completed: todo(operation="update_todo", project_id="[ID]", todo_id="[todo_id]", status="completed")
 
-6. **Archive Project (Important!):**
+3. **Archive Project (Important!):**
    After all todos are completed, ALWAYS archive the project:
    - todo(operation="archive_project", project_id="[ID]")
 
@@ -349,32 +345,31 @@ This tool supports multiple projects/tasks. Each project can contain multiple to
 
 **How to use todo:**
 
-1. **Create a Project (Task Container):**
-   - todo(operation="create_project", project_name="项目名称", description="可选描述")
+1. **Create Project and Add Todos:**
+   - todo(operation="add_todos", project_name="项目名称", description="可选描述", todos=[{"content":"待办内容", "priority":"high/medium/low"}])
+   - add_todos automatically finds or creates an active project and returns project_id plus todo_ids.
 
-2. **Add Todos to a Project:**
-   - todo(operation="add_todo", project_id="项目ID", content="待办内容", priority="high/medium/low")
-
-3. **Update Todo Status:**
+2. **Update Todo Status:**
    - todo(operation="update_todo", project_id="项目ID", todo_id="待办ID", status="pending/in_progress/completed/failed")
 
-4. **List Projects:**
+3. **List Projects:**
    - todo(operation="list_projects", include_archived=true/false)
 
-5. **List Todos in a Project:**
+4. **List Todos in a Project:**
    - todo(operation="list_todos", project_id="项目ID")
 
-6. **Archive/Delete Project:**
+5. **Archive/Delete Project:**
    - todo(operation="archive_project", project_id="项目ID")
    - todo(operation="delete_project", project_id="项目ID")
 
 **Example - Automatic Planning:**
 User: "Search for Python tutorials, save top 5 to a file, then read and summarize"
 → You should AUTOMATICALLY:
-  1. Create a project: todo(operation="create_project", project_name="Python Tutorials Research")
-  2. Add todos: todo(operation="add_todo", project_id="[返回的ID]", content="Search for Python tutorials")
-  3. Add todos: todo(operation="add_todo", project_id="[返回的ID]", content="Save top 5 to file")
-  4. Add todos: todo(operation="add_todo", project_id="[返回的ID]", content="Read and summarize")
+  1. Add todos: todo(operation="add_todos", project_name="Python Tutorials Research", todos=[
+       {"content":"Search for Python tutorials"},
+       {"content":"Save top 5 to file"},
+       {"content":"Read and summarize"}
+     ])
 → Then execute each step and update status
 
 **Task Classification Examples:**
@@ -391,7 +386,7 @@ User: "Search for Python tutorials, save top 5 to a file, then read and summariz
 | Task Type | First Action | Final Action |
 |-----------|--------------|--------------|
 | Type A (Simple) | Direct response | None needed |
-| Type B (Execution) | todo: create_project | message: send to channel |
+| Type B (Execution) | todo: add_todos | message: send to channel |
 
 **CRITICAL RULE**: For Type B tasks, NEVER execute steps before creating the todo plan!
 

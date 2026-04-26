@@ -4,8 +4,9 @@
 # ============================================================
 #
 # 使用方法:
-#   1. 复制配置: cp config.example.yaml config.yaml
-#   2. 编辑配置: vim config.yaml (填入 API 密钥)
+#   1. 生成配置: ./nanogrip init
+#      或复制示例: cp config.example.yaml ~/.nanogrip/config.yaml
+#   2. 编辑配置: vim ~/.nanogrip/config.yaml (填入 API 密钥)
 #   3. 启动服务: docker-compose up -d
 #   4. 查看日志: docker-compose logs -f
 #   5. 停止服务: docker-compose down
@@ -43,7 +44,7 @@ services:
     # 卷挂载 (主机路径:容器路径)
     volumes:
       # 配置文件目录
-      - ./config.yaml:/home/nanogrip/.nanogrip/config.yaml:ro
+      - ${HOME}/.nanogrip/config.yaml:/home/nanogrip/.nanogrip/config.yaml:ro
       # 工作区目录
       - nanogrip-workspace:/home/nanogrip/.nanogrip/workspace
       # 技能目录（可选，自定义技能）

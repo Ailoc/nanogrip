@@ -1,6 +1,5 @@
-// Package providers 提供了LLM提供商的核心接口和类型定义
-// 这个包定义了与各种大语言模型提供商交互所需的基础数据结构和接口
-// 包括消息格式、工具调用、响应处理等核心功能
+// Package providers provides the core LLM provider interface and shared types.
+// The project intentionally supports only the official OpenAI and Anthropic APIs.
 package providers
 
 import (
@@ -23,7 +22,7 @@ type LLMResponse struct {
 	ToolCalls        []ToolCallRequest // 模型请求的工具调用列表，可能为空
 	FinishReason     string            // 完成原因，如"stop"、"length"、"tool_calls"等
 	Usage            map[string]int    // token使用统计，包括prompt_tokens、completion_tokens等
-	ReasoningContent string            // 推理内容（某些模型如DeepSeek支持），用于存储模型的思考过程
+	ReasoningContent string            // 推理内容（如 Anthropic thinking blocks），用于存储模型的思考过程
 }
 
 // HasToolCalls 检查响应中是否包含工具调用
@@ -43,8 +42,8 @@ type Message struct {
 	Name       string            `json:"name,omitempty"`         // 工具名称或函数名称（用于工具响应消息）
 }
 
-// LLMProvider 是LLM提供商的核心接口
-// 所有具体的LLM提供商实现都必须实现这个接口
+// LLMProvider 是 LLM 提供商的核心接口。
+// 当前仅由 OpenAIProvider 和 AnthropicProvider 实现。
 type LLMProvider interface {
 	// Chat 发送聊天完成请求到LLM提供商
 	// ctx: 上下文，用于控制请求的生命周期和取消
@@ -59,6 +58,19 @@ type LLMProvider interface {
 	// GetDefaultModel 返回提供商的默认模型名称
 	// 当用户未指定模型时，使用这个默认值
 	GetDefaultModel() string
+}
+
+// StreamCallback receives incremental text deltas from a streaming response.
+type StreamCallback func(delta string)
+
+// StreamingLLMProvider is implemented by providers that can stream text deltas.
+type StreamingLLMProvider interface {
+	LLMProvider
+
+	// ChatStream sends a streaming chat request. Implementations should call
+	// onDelta for each text delta while still returning the fully accumulated
+	// response so the agent loop can preserve history and handle tool calls.
+	ChatStream(ctx context.Context, messages []Message, tools []ToolDef, model string, maxTokens int, temperature float64, onDelta StreamCallback) (*LLMResponse, error)
 }
 
 // ToolDef 表示工具定义
@@ -89,4 +101,25 @@ func ParseToolArguments(args string) (map[string]interface{}, error) {
 	var result map[string]interface{}
 	err := json.Unmarshal([]byte(args), &result)
 	return result, err
+}
+
+// ToolArgumentsJSON returns a stable JSON string for tool-call arguments.
+func ToolArgumentsJSON(args map[string]interface{}) string {
+	if raw, ok := args["_raw"].(string); ok && raw != "" {
+		return raw
+	}
+
+	clean := make(map[string]interface{}, len(args))
+	for key, value := range args {
+		if key == "_raw" {
+			continue
+		}
+		clean[key] = value
+	}
+
+	b, err := json.Marshal(clean)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }

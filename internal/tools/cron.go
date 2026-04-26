@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/Ailoc/nanogrip/internal/cron"
@@ -23,6 +24,7 @@ type CronTool struct {
 	cronService *cron.CronService // Cron服务实例，负责实际的任务调度
 	channel     string            // 当前会话的频道名称
 	chatID      string            // 当前会话的聊天ID
+	mu          sync.RWMutex      // 保护会话上下文
 }
 
 // NewCronTool 创建一个新的定时任务工具
@@ -94,6 +96,8 @@ func NewCronTool(cronService *cron.CronService) *CronTool {
 //	channel: 频道名称
 //	chatID: 聊天ID
 func (t *CronTool) SetContext(channel string, chatID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.channel = channel
 	t.chatID = chatID
 }
@@ -120,7 +124,7 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]interface{}) (
 	// 根据操作类型执行相应功能
 	switch action {
 	case "add":
-		return t.addJob(params)
+		return t.addJob(ctx, params)
 	case "list":
 		return t.listJobs()
 	case "remove":
@@ -143,7 +147,7 @@ func (t *CronTool) Execute(ctx context.Context, params map[string]interface{}) (
 // 返回:
 //
 //	任务创建结果的描述字符串
-func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
+func (t *CronTool) addJob(ctx context.Context, params map[string]interface{}) (string, error) {
 	// 获取参数
 	mode, _ := params["mode"].(string)
 	message, _ := params["message"].(string)
@@ -159,7 +163,24 @@ func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 	}
 
 	// 验证会话上下文
-	if t.channel == "" || t.chatID == "" {
+	channel := ""
+	chatID := ""
+	if toolCtx, ok := ToolContextFrom(ctx); ok {
+		channel = toolCtx.Channel
+		chatID = toolCtx.ChatID
+	}
+	if channel == "" || chatID == "" {
+		t.mu.RLock()
+		if channel == "" {
+			channel = t.channel
+		}
+		if chatID == "" {
+			chatID = t.chatID
+		}
+		t.mu.RUnlock()
+	}
+
+	if channel == "" || chatID == "" {
 		return "Error: no session context (channel/chat_id)", nil
 	}
 
@@ -242,8 +263,8 @@ func (t *CronTool) addJob(params map[string]interface{}) (string, error) {
 		Name:           taskContent,
 		Message:        message, // Message 模式的内容
 		Schedule:       schedule,
-		Channel:        t.channel,
-		To:             t.chatID,
+		Channel:        channel,
+		To:             chatID,
 		Deliver:        true,
 		DeleteAfterRun: deleteAfter,
 		// Agent 模式字段

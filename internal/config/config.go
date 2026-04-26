@@ -97,23 +97,14 @@ type TelegramConfig struct {
 	// `yaml:"allowFrom"` 表示此字段对应 YAML 文件中的 "allowFrom" 键
 	AllowFrom []string `yaml:"allowFrom"`
 
-	// Proxy 代理服务器地址（可选）
-	// 用于在受限网络环境中访问 Telegram API
-	// `yaml:"proxy"` 表示此字段对应 YAML 文件中的 "proxy" 键
-	Proxy string `yaml:"proxy"`
-
 	// ReplyToMessage 是否以回复消息的方式响应
 	// `yaml:"replyToMessage"` 表示此字段对应 YAML 文件中的 "replyToMessage" 键
 	ReplyToMessage bool `yaml:"replyToMessage"`
 }
 
-// ProvidersConfig 包含各种 LLM（大语言模型）提供商的配置
-// 支持多个 AI 服务提供商，每个提供商都有自己的 API 密钥和基础 URL
+// ProvidersConfig 包含官方 LLM 提供商配置。
+// 项目只支持 OpenAI 和 Anthropic API。
 type ProvidersConfig struct {
-	// Custom 自定义提供商配置
-	// `yaml:"custom"` 表示此字段对应 YAML 文件中的 "custom" 键
-	Custom ProviderConfig `yaml:"custom"`
-
 	// Anthropic Anthropic (Claude) 提供商配置
 	// `yaml:"anthropic"` 表示此字段对应 YAML 文件中的 "anthropic" 键
 	Anthropic ProviderConfig `yaml:"anthropic"`
@@ -121,62 +112,6 @@ type ProvidersConfig struct {
 	// OpenAI OpenAI (GPT) 提供商配置
 	// `yaml:"openai"` 表示此字段对应 YAML 文件中的 "openai" 键
 	OpenAI ProviderConfig `yaml:"openai"`
-
-	// OpenRouter OpenRouter 提供商配置
-	// `yaml:"openrouter"` 表示此字段对应 YAML 文件中的 "openrouter" 键
-	OpenRouter ProviderConfig `yaml:"openrouter"`
-
-	// DeepSeek DeepSeek 提供商配置
-	// `yaml:"deepseek"` 表示此字段对应 YAML 文件中的 "deepseek" 键
-	DeepSeek ProviderConfig `yaml:"deepseek"`
-
-	// Groq Groq 提供商配置
-	// `yaml:"groq"` 表示此字段对应 YAML 文件中的 "groq" 键
-	Groq ProviderConfig `yaml:"groq"`
-
-	// Zhipu 智谱 AI 提供商配置
-	// `yaml:"zhipu"` 表示此字段对应 YAML 文件中的 "zhipu" 键
-	Zhipu ProviderConfig `yaml:"zhipu"`
-
-	// DashScope 阿里云百炼（DashScope）提供商配置
-	// `yaml:"dashscope"` 表示此字段对应 YAML 文件中的 "dashscope" 键
-	DashScope ProviderConfig `yaml:"dashscope"`
-
-	// VLLM vLLM 提供商配置
-	// `yaml:"vllm"` 表示此字段对应 YAML 文件中的 "vllm" 键
-	VLLM ProviderConfig `yaml:"vllm"`
-
-	// Gemini Google Gemini 提供商配置
-	// `yaml:"gemini"` 表示此字段对应 YAML 文件中的 "gemini" 键
-	Gemini ProviderConfig `yaml:"gemini"`
-
-	// MoonShot 月之暗面（MoonShot）提供商配置
-	// `yaml:"moonshot"` 表示此字段对应 YAML 文件中的 "moonshot" 键
-	MoonShot ProviderConfig `yaml:"moonshot"`
-
-	// MiniMax MiniMax 提供商配置
-	// `yaml:"minimax"` 表示此字段对应 YAML 文件中的 "minimax" 键
-	MiniMax ProviderConfig `yaml:"minimax"`
-
-	// AiHubMix AiHubMix 提供商配置
-	// `yaml:"aihubmix"` 表示此字段对应 YAML 文件中的 "aihubmix" 键
-	AiHubMix ProviderConfig `yaml:"aihubmix"`
-
-	// SiliconFlow SiliconFlow 提供商配置
-	// `yaml:"siliconflow"` 表示此字段对应 YAML 文件中的 "siliconflow" 键
-	SiliconFlow ProviderConfig `yaml:"siliconflow"`
-
-	// VolcEngine 火山引擎（VolcEngine）提供商配置
-	// `yaml:"volcengine"` 表示此字段对应 YAML 文件中的 "volcengine" 键
-	VolcEngine ProviderConfig `yaml:"volcengine"`
-
-	// OpenAICodex OpenAI Codex 提供商配置
-	// `yaml:"openai_codex"` 表示此字段对应 YAML 文件中的 "openai_codex" 键
-	OpenAICodex ProviderConfig `yaml:"openai_codex"`
-
-	// GithubCopilot GitHub Copilot 提供商配置
-	// `yaml:"github_copilot"` 表示此字段对应 YAML 文件中的 "github_copilot" 键
-	GithubCopilot ProviderConfig `yaml:"github_copilot"`
 }
 
 // ProviderConfig 包含单个 LLM 提供商的具体配置信息
@@ -188,14 +123,9 @@ type ProviderConfig struct {
 	APIKey string `yaml:"apiKey"`
 
 	// APIBase API 基础 URL
-	// 用于自定义 API 端点地址，如使用代理或自托管服务
+	// 用于官方 SDK 的可选自定义端点，如企业代理
 	// `yaml:"apiBase"` 表示此字段对应 YAML 文件中的 "apiBase" 键
 	APIBase string `yaml:"apiBase"`
-
-	// ExtraHeaders 额外的 HTTP 请求头
-	// 可以添加自定义的请求头，如特殊的认证信息或元数据
-	// `yaml:"extraHeaders"` 表示此字段对应 YAML 文件中的 "extraHeaders" 键
-	ExtraHeaders map[string]string `yaml:"extraHeaders"`
 }
 
 // ToolsConfig 包含工具的配置信息
@@ -344,6 +274,15 @@ func Load(path string) (*Config, error) {
 	// 默认记忆窗口大小
 	if cfg.Agents.Defaults.MemoryWindow == 0 {
 		cfg.Agents.Defaults.MemoryWindow = 50
+	}
+	if cfg.Tools.Exec.Timeout == 0 {
+		cfg.Tools.Exec.Timeout = 60
+	}
+	if cfg.Tools.Web.Search.Provider == "" {
+		cfg.Tools.Web.Search.Provider = "tavily"
+	}
+	if cfg.Tools.Web.Search.MaxResults == 0 {
+		cfg.Tools.Web.Search.MaxResults = 5
 	}
 
 	return &cfg, nil

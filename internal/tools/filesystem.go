@@ -103,6 +103,15 @@ func (t *FilesystemTool) Execute(ctx context.Context, params map[string]interfac
 	case "list":
 		return t.listDir(resolvedPath)
 	case "delete":
+		if t.restrict {
+			absWorkspace, err := filepath.Abs(t.workspace)
+			if err != nil {
+				return "", err
+			}
+			if resolvedPath == absWorkspace {
+				return "", fmt.Errorf("refusing to delete workspace root: %s", resolvedPath)
+			}
+		}
 		err := t.deletePath(resolvedPath)
 		if err != nil {
 			return "", err
@@ -150,7 +159,8 @@ func (t *FilesystemTool) resolvePath(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if !strings.HasPrefix(absPath, absWorkspace) {
+		rel, err := filepath.Rel(absWorkspace, absPath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
 			return "", fmt.Errorf("path '%s' is outside workspace", path)
 		}
 	}
@@ -210,10 +220,13 @@ func (t *FilesystemTool) listDir(path string) (string, error) {
 
 	var result []string
 	for _, e := range entries {
-		info, _ := e.Info()
 		if e.IsDir() {
 			result = append(result, fmt.Sprintf("%s/", e.Name()))
 		} else {
+			info, err := e.Info()
+			if err != nil {
+				return "", err
+			}
 			result = append(result, fmt.Sprintf("%s (%d bytes)", e.Name(), info.Size()))
 		}
 	}

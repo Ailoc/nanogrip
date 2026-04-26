@@ -25,7 +25,10 @@
 package session
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -333,15 +336,35 @@ func (sm *SessionManager) load(key string) *Session {
 	var createdAt time.Time
 	lastConsolidated := 0
 
-	decoder := json.NewDecoder(file)
-	for decoder.More() {
+	reader := bufio.NewReader(file)
+	for {
+		line, readErr := reader.ReadBytes('\n')
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				break
+			}
+			continue
+		}
+
 		var data map[string]interface{}
-		if err := decoder.Decode(&data); err != nil {
+		if err := json.Unmarshal(line, &data); err != nil {
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				break
+			}
 			continue
 		}
 
 		if data["_type"] == "metadata" {
-			metadata = data["metadata"].(map[string]interface{})
+			if rawMetadata, ok := data["metadata"].(map[string]interface{}); ok {
+				metadata = rawMetadata
+			}
 			if createdAtStr, ok := data["created_at"].(string); ok {
 				createdAt, _ = time.Parse(time.RFC3339, createdAtStr)
 			}
@@ -354,6 +377,13 @@ func (sm *SessionManager) load(key string) *Session {
 				json.Unmarshal(b, &msg)
 			}
 			messages = append(messages, msg)
+		}
+
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			break
 		}
 	}
 
@@ -477,18 +507,16 @@ func (sm *SessionManager) ListSessions() []map[string]interface{} {
 
 		var metadata map[string]interface{}
 		decoder := json.NewDecoder(file)
-		if decoder.More() {
-			var data map[string]interface{}
-			if err := decoder.Decode(&data); err == nil {
-				if data["_type"] == "metadata" {
-					metadata = data
-				}
+		var data map[string]interface{}
+		if err := decoder.Decode(&data); err == nil {
+			if data["_type"] == "metadata" {
+				metadata = data
 			}
 		}
 		file.Close()
 
 		if metadata != nil {
-			key := metadata["key"].(string)
+			key, _ := metadata["key"].(string)
 			if key == "" {
 				key = entry.Name()[:len(entry.Name())-len(".jsonl")]
 			}

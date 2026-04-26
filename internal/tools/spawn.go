@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"sync"
 )
 
 // spawn.go - 子代理生成工具
@@ -17,6 +18,7 @@ type SpawnTool struct {
 	spawnFunc func(task string, label string, originChannel string, originChatID string) string
 	channel   string // 当前上下文频道
 	chatID    string // 当前上下文聊天ID
+	mu        sync.RWMutex
 }
 
 // NewSpawnTool 创建一个新的子代理生成工具
@@ -58,6 +60,8 @@ func NewSpawnTool(spawnFunc func(task string, label string, originChannel string
 //	channel: 当前频道
 //	chatID: 当前聊天ID
 func (t *SpawnTool) SetContext(channel string, chatID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.channel = channel
 	t.chatID = chatID
 }
@@ -85,8 +89,22 @@ func (t *SpawnTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 
 	// 使用上下文默认值（通过 SetContext 设置）
-	originChannel := t.channel
-	originChatID := t.chatID
+	originChannel := ""
+	originChatID := ""
+	if toolCtx, ok := ToolContextFrom(ctx); ok {
+		originChannel = toolCtx.Channel
+		originChatID = toolCtx.ChatID
+	}
+	if originChannel == "" || originChatID == "" {
+		t.mu.RLock()
+		if originChannel == "" {
+			originChannel = t.channel
+		}
+		if originChatID == "" {
+			originChatID = t.chatID
+		}
+		t.mu.RUnlock()
+	}
 
 	// 如果上下文为空，使用默认值
 	if originChannel == "" {

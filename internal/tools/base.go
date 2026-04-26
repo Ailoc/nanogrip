@@ -26,6 +26,25 @@ type Tool interface {
 	Execute(ctx context.Context, params map[string]interface{}) (string, error)
 }
 
+type toolContextKey struct{}
+
+// ToolContext carries the default chat target for context-aware tools.
+type ToolContext struct {
+	Channel string
+	ChatID  string
+}
+
+// WithToolContext attaches the current chat target to a context.
+func WithToolContext(ctx context.Context, channel, chatID string) context.Context {
+	return context.WithValue(ctx, toolContextKey{}, ToolContext{Channel: channel, ChatID: chatID})
+}
+
+// ToolContextFrom returns the current chat target stored in ctx.
+func ToolContextFrom(ctx context.Context) (ToolContext, bool) {
+	toolCtx, ok := ctx.Value(toolContextKey{}).(ToolContext)
+	return toolCtx, ok
+}
+
 // BaseTool 提供工具的通用功能实现
 // 其他具体工具可以通过嵌入此结构体来复用基础功能
 type BaseTool struct {
@@ -87,28 +106,37 @@ func (t *BaseTool) ToSchema() map[string]interface{} {
 //	错误信息的字符串切片，如果验证通过则为空切片
 func (t *BaseTool) ValidateParams(params map[string]interface{}) []string {
 	var errors []string
-	if t.parameters == nil {
-		return errors
-	}
-
-	// 获取必需参数列表
-	required, ok := t.parameters["required"].([]interface{})
-	if !ok {
-		return errors
-	}
 
 	// 检查每个必需参数是否存在
-	for _, req := range required {
-		reqStr, ok := req.(string)
-		if !ok {
-			continue
-		}
-		if _, exists := params[reqStr]; !exists {
-			errors = append(errors, fmt.Sprintf("missing required parameter: %s", reqStr))
+	for _, name := range RequiredParameterNames(t.parameters) {
+		if _, exists := params[name]; !exists {
+			errors = append(errors, fmt.Sprintf("missing required parameter: %s", name))
 		}
 	}
 
 	return errors
+}
+
+// RequiredParameterNames extracts required parameter names from a JSON schema.
+func RequiredParameterNames(schema map[string]interface{}) []string {
+	if schema == nil {
+		return nil
+	}
+
+	switch required := schema["required"].(type) {
+	case []string:
+		return required
+	case []interface{}:
+		names := make([]string, 0, len(required))
+		for _, item := range required {
+			if name, ok := item.(string); ok {
+				names = append(names, name)
+			}
+		}
+		return names
+	default:
+		return nil
+	}
 }
 
 // ToolResult 表示工具执行的结果

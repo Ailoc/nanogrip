@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -84,9 +85,15 @@ func (r *ToolRegistry) GetDefinitions() []map[string]interface{} {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	definitions := make([]map[string]interface{}, 0, len(r.tools))
-	for _, tool := range r.tools {
-		definitions = append(definitions, tool.ToSchema())
+	for _, name := range names {
+		definitions = append(definitions, r.tools[name].ToSchema())
 	}
 
 	return definitions
@@ -136,6 +143,7 @@ func (r *ToolRegistry) ToolNames() []string {
 	for name := range r.tools {
 		names = append(names, name)
 	}
+	sort.Strings(names)
 
 	return names
 }

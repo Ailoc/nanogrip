@@ -31,29 +31,30 @@ import (
 // AgentLoop 是主要的 Agent 循环处理器
 // 它协调所有核心组件来处理用户消息并生成响应
 type AgentLoop struct {
-	provider            providers.LLMProvider         // LLM 提供商（OpenAI、Anthropic 等）
-	tools               *tools.ToolRegistry         // 工具注册表，包含所有可用的工具
-	bus                 *bus.MessageBus             // 消息总线，用于接收和发送消息
-	sessions            *session.SessionManager     // 会话管理器，管理用户会话历史
-	contextBuilder      *ContextBuilder             // 上下文构建器，用于构建系统提示词
-	memoryStore         *MemoryStore                // 记忆存储，用于长期记忆和历史
-	workspace           string                      // 工作空间路径
-	model               string                      // LLM 模型名称（如 gpt-4、claude-3-5-sonnet）
-	maxTokens           int                         // 最大令牌数
-	temperature         float64                     // 温度参数（控制随机性）
-	maxIterations       int                         // 最大迭代次数（防止无限循环）
-	memoryWindow        int                         // 记忆窗口大小（保留多少条历史消息）
-	running             bool                        // 循环是否正在运行
-	runningMu           sync.RWMutex                // running 字段的读写锁
-	consolidating       map[string]bool             // 正在整理记忆的会话
-	consolidatingMu     sync.Mutex                  // 整理记忆的互斥锁
-	messageChan         chan string                 // 消息通道（用于工具发送消息）
-	currentChannel      string                      // 当前处理的通道
-	currentChatID       string                      // 当前处理的聊天 ID
-	wg                  sync.WaitGroup             // 等待所有goroutine结束
-	cancelFunc          context.CancelFunc          // 用于取消所有子goroutine
-	ctx                 context.Context             // 上下文，用于取消操作
-	subagents           *SubagentManager           // 子代理管理器
+	provider        providers.LLMProvider   // LLM 提供商（OpenAI、Anthropic 等）
+	tools           *tools.ToolRegistry     // 工具注册表，包含所有可用的工具
+	bus             *bus.MessageBus         // 消息总线，用于接收和发送消息
+	sessions        *session.SessionManager // 会话管理器，管理用户会话历史
+	contextBuilder  *ContextBuilder         // 上下文构建器，用于构建系统提示词
+	memoryStore     *MemoryStore            // 记忆存储，用于长期记忆和历史
+	workspace       string                  // 工作空间路径
+	model           string                  // LLM 模型名称（如 gpt-4、claude-3-5-sonnet）
+	maxTokens       int                     // 最大令牌数
+	temperature     float64                 // 温度参数（控制随机性）
+	maxIterations   int                     // 最大迭代次数（防止无限循环）
+	memoryWindow    int                     // 记忆窗口大小（保留多少条历史消息）
+	running         bool                    // 循环是否正在运行
+	runningMu       sync.RWMutex            // running 字段的读写锁
+	consolidating   map[string]bool         // 正在整理记忆的会话
+	consolidatingMu sync.Mutex              // 整理记忆的互斥锁
+	messageChan     chan string             // 消息通道（用于工具发送消息）
+	toolContextMu   sync.RWMutex            // 保护当前工具上下文
+	currentChannel  string                  // 当前处理的通道
+	currentChatID   string                  // 当前处理的聊天 ID
+	wg              sync.WaitGroup          // 等待所有goroutine结束
+	cancelFunc      context.CancelFunc      // 用于取消所有子goroutine
+	ctx             context.Context         // 上下文，用于取消操作
+	subagents       *SubagentManager        // 子代理管理器
 }
 
 // NewAgentLoop 创建一个新的 Agent 循环处理器
@@ -94,8 +95,6 @@ func NewAgentLoop(
 			builtinSkills = "skills"
 		}
 	}
-
-	log.Printf("Loading built-in skills from: %s", builtinSkills)
 
 	// 创建记忆存储
 	memoryStore := NewMemoryStore(workspace)
@@ -251,8 +250,10 @@ func (a *AgentLoop) processMessages(ctx context.Context) {
 // 5. 运行 Agent 循环进行推理
 // 6. 保存会话历史
 func (a *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) (*bus.OutboundMessage, error) {
-	log.Printf("Processing message from %s:%s", msg.Channel, msg.SenderID)
+	return a.processMessageWithStream(ctx, msg, nil)
+}
 
+func (a *AgentLoop) processMessageWithStream(ctx context.Context, msg bus.InboundMessage, onDelta providers.StreamCallback) (*bus.OutboundMessage, error) {
 	// 处理系统消息（子代理公告）
 	// chat_id 包含原始的 "channel:chat_id" 用于路由回复
 	if msg.Channel == "system" {
@@ -270,6 +271,7 @@ func (a *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) 
 
 	// 设置工具上下文（通道、聊天 ID 和交互处理器）
 	a.SetToolContext(msg.Channel, msg.ChatID)
+	ctx = tools.WithToolContext(ctx, msg.Channel, msg.ChatID)
 
 	// 处理 /new 命令 - 开始新会话
 	if msg.Content == "/new" {
@@ -306,7 +308,7 @@ func (a *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) 
 	)
 
 	// 运行 Agent 循环进行推理和工具调用
-	finalContent, err := a.runAgentLoop(ctx, messages)
+	finalContent, err := a.runAgentLoopWithStream(ctx, messages, onDelta)
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +345,10 @@ func (a *AgentLoop) processMessage(ctx context.Context, msg bus.InboundMessage) 
 //
 //	-> 否：返回最终响应
 func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]interface{}) (string, error) {
+	return a.runAgentLoopWithStream(ctx, messages, nil)
+}
+
+func (a *AgentLoop) runAgentLoopWithStream(ctx context.Context, messages []map[string]interface{}, onDelta providers.StreamCallback) (string, error) {
 	iteration := 0
 	var finalContent string
 
@@ -389,7 +395,7 @@ func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]inte
 					args, _ := funcMap["arguments"].(string)
 
 					argsMap := make(map[string]interface{})
-					json.Unmarshal([]byte(args), &argsMap)
+					_ = json.Unmarshal([]byte(args), &argsMap)
 					argsMap["_raw"] = args
 
 					providerMessages[i].Tools = append(providerMessages[i].Tools, providers.ToolCallRequest{
@@ -415,13 +421,8 @@ func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]inte
 				})
 			}
 		}
-		log.Printf("Total tools sent to LLM: %d", len(toolDefs))
-		for i, td := range toolDefs {
-			log.Printf("Tool %d: %s", i, td.Function.Name)
-		}
-
 		// 调用 LLM 提供商获取响应
-		resp, err := a.provider.Chat(ctx, providerMessages, toolDefs, a.model, a.maxTokens, a.temperature)
+		resp, err := a.chat(ctx, providerMessages, toolDefs, onDelta)
 		if err != nil {
 			return "", err
 		}
@@ -431,18 +432,16 @@ func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]inte
 			// 构建工具调用字典 - 与 nanobot 一致
 			toolCallDicts := make([]map[string]interface{}, len(resp.ToolCalls))
 			for i, tc := range resp.ToolCalls {
-				argsStr, _ := json.Marshal(tc.Arguments)
+				argsStr := providers.ToolArgumentsJSON(tc.Arguments)
 				toolCallDicts[i] = map[string]interface{}{
 					"id":   tc.ID,
 					"type": "function",
 					"function": map[string]string{
 						"name":      tc.Name,
-						"arguments": string(argsStr),
+						"arguments": argsStr,
 					},
 				}
 			}
-
-			log.Printf("Tool call: %s", FormatToolCalls(toolCallDicts))
 
 			// 【关键修复】与 nanobot 一致：先添加工具调用的助手消息，再执行工具
 			// 这确保 LLM 知道它自己调用了哪些工具
@@ -454,17 +453,7 @@ func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]inte
 
 			// 执行工具调用
 			for _, tc := range resp.ToolCalls {
-				argsStr, _ := json.Marshal(tc.Arguments)
-				log.Printf("Executing tool: %s with arguments: %s", tc.Name, string(argsStr))
 				result := a.tools.Execute(ctx, tc.Name, tc.Arguments)
-
-				// 【修复】日志显示时截断，但保持 result 完整用于 LLM
-				logResult := result
-				maxLen := 500
-				if len(logResult) > maxLen {
-					logResult = logResult[:maxLen] + "..."
-				}
-				log.Printf("Tool result (%s): %s", tc.Name, logResult)
 
 				// 添加完整的工具结果消息给 LLM
 				messages = append(messages, map[string]interface{}{
@@ -490,17 +479,48 @@ func (a *AgentLoop) runAgentLoop(ctx context.Context, messages []map[string]inte
 	return finalContent, nil
 }
 
+func (a *AgentLoop) chat(ctx context.Context, messages []providers.Message, toolDefs []providers.ToolDef, onDelta providers.StreamCallback) (*providers.LLMResponse, error) {
+	if onDelta != nil {
+		if streamingProvider, ok := a.provider.(providers.StreamingLLMProvider); ok {
+			emitted := false
+			wrappedDelta := func(delta string) {
+				if delta == "" {
+					return
+				}
+				emitted = true
+				onDelta(delta)
+			}
+
+			resp, err := streamingProvider.ChatStream(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature, wrappedDelta)
+			if err == nil {
+				return resp, nil
+			}
+			if emitted {
+				return nil, err
+			}
+
+			log.Printf("Streaming chat failed before output, falling back to non-streaming chat: %v", err)
+		}
+	}
+
+	return a.provider.Chat(ctx, messages, toolDefs, a.model, a.maxTokens, a.temperature)
+}
+
 // ProcessDirect 直接处理消息（用于 CLI 或 Cron）
 // 这个方法用于命令行界面或 cron 任务，不通过消息总线
 // 使用当前设置的 currentChannel 和 currentChatID 作为目标
 func (a *AgentLoop) ProcessDirect(ctx context.Context, content string) (string, error) {
-	log.Printf("[AgentLoop] ProcessDirect 被调用: content=%.50s", content)
-	log.Printf("[AgentLoop] 当前上下文: currentChannel=%q, currentChatID=%q", a.currentChannel, a.currentChatID)
+	return a.ProcessDirectStream(ctx, content, nil)
+}
 
+// ProcessDirectStream directly handles a message and streams text deltas when supported.
+func (a *AgentLoop) ProcessDirectStream(ctx context.Context, content string, onDelta providers.StreamCallback) (string, error) {
 	// 使用当前设置的 Channel 和 ChatID（由 SetToolContext 设置）
 	// 如果未设置（如 CLI 模式），使用默认值
+	a.toolContextMu.RLock()
 	channel := a.currentChannel
 	chatID := a.currentChatID
+	a.toolContextMu.RUnlock()
 
 	if channel == "" {
 		channel = "cli"
@@ -509,7 +529,24 @@ func (a *AgentLoop) ProcessDirect(ctx context.Context, content string) (string, 
 		chatID = "direct"
 	}
 
-	log.Printf("[AgentLoop] 将使用的: channel=%q, chatID=%q", channel, chatID)
+	return a.ProcessDirectWithContextStream(ctx, channel, chatID, content, onDelta)
+}
+
+// ProcessDirectWithContext directly processes a message for a specific chat target.
+func (a *AgentLoop) ProcessDirectWithContext(ctx context.Context, channel, chatID, content string) (string, error) {
+	return a.ProcessDirectWithContextStream(ctx, channel, chatID, content, nil)
+}
+
+// ProcessDirectWithContextStream directly processes a message for a specific chat target and streams text deltas when supported.
+func (a *AgentLoop) ProcessDirectWithContextStream(ctx context.Context, channel, chatID, content string, onDelta providers.StreamCallback) (string, error) {
+	if channel == "" {
+		channel = "cli"
+	}
+	if chatID == "" {
+		chatID = "direct"
+	}
+
+	ctx = tools.WithToolContext(ctx, channel, chatID)
 
 	msg := bus.InboundMessage{
 		Message: bus.Message{
@@ -520,7 +557,7 @@ func (a *AgentLoop) ProcessDirect(ctx context.Context, content string) (string, 
 		},
 	}
 
-	response, err := a.processMessage(ctx, msg)
+	response, err := a.processMessageWithStream(ctx, msg, onDelta)
 	if err != nil {
 		log.Printf("[AgentLoop] processMessage 返回错误: %v", err)
 		return "", err
@@ -531,7 +568,6 @@ func (a *AgentLoop) ProcessDirect(ctx context.Context, content string) (string, 
 		return "", fmt.Errorf("no response")
 	}
 
-	log.Printf("[AgentLoop] processMessage 成功，响应长度: %d", len(response.Content))
 	return response.Content, nil
 }
 
@@ -544,8 +580,10 @@ func (a *AgentLoop) SetMessageChan(ch chan string) {
 // SetToolContext 设置工具上下文（通道和聊天 ID）
 // 在处理消息前调用，以确保工具知道当前上下文
 func (a *AgentLoop) SetToolContext(channel, chatID string) {
+	a.toolContextMu.Lock()
 	a.currentChannel = channel
 	a.currentChatID = chatID
+	a.toolContextMu.Unlock()
 
 	// 更新 message 工具的上下文
 	if msgTool := a.tools.Get("message"); msgTool != nil {
@@ -766,6 +804,7 @@ func (a *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMes
 	// 使用来源会话获取上下文
 	sessionKey := fmt.Sprintf("%s:%s", originChannel, originChatID)
 	sess := a.sessions.GetOrCreate(sessionKey)
+	ctx = tools.WithToolContext(ctx, originChannel, originChatID)
 
 	// 更新工具上下文
 	if msgTool := a.tools.Get("message"); msgTool != nil {
@@ -835,11 +874,6 @@ func (a *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMes
 				})
 			}
 		}
-		log.Printf("Total tools sent to LLM: %d", len(toolDefs))
-		for i, td := range toolDefs {
-			log.Printf("Tool %d: %s", i, td.Function.Name)
-		}
-
 		// 调用 LLM
 		resp, err := a.provider.Chat(ctx, providerMessages, toolDefs, a.model, a.maxTokens, a.temperature)
 		if err != nil {
@@ -850,13 +884,13 @@ func (a *AgentLoop) processSystemMessage(ctx context.Context, msg bus.InboundMes
 			// 构建工具调用字典
 			toolCallDicts := make([]map[string]interface{}, len(resp.ToolCalls))
 			for i, tc := range resp.ToolCalls {
-				argsStr, _ := json.Marshal(tc.Arguments)
+				argsStr := providers.ToolArgumentsJSON(tc.Arguments)
 				toolCallDicts[i] = map[string]interface{}{
 					"id":   tc.ID,
 					"type": "function",
 					"function": map[string]string{
 						"name":      tc.Name,
-						"arguments": string(argsStr),
+						"arguments": argsStr,
 					},
 				}
 			}

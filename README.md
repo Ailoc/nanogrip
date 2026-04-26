@@ -26,7 +26,7 @@ This project is currently in the initial construction phase and **should not be 
 This project is designed for:
 
 - **AI Agent Enthusiasts & Learners**: Those who want to understand how AI agents work and explore agent architecture
-- **OpenAI-Compatible API Researchers**: Developers interested in learning about OpenAI-compatible API integration patterns
+- **Official LLM API Researchers**: Developers interested in OpenAI and Anthropic SDK integration patterns
 - **Go Framework Developers**: Those studying how to build lightweight, extensible frameworks in Go
 - **Contributors & Experimenters**: Developers who enjoy contributing to early-stage projects and shaping the development direction
 
@@ -97,7 +97,10 @@ go build -o nanogrip ./cmd/nanogrip
 ### Configuration
 
 ```bash
-# Copy example config
+# Generate config in ~/.nanogrip/config.yaml
+./nanogrip init
+
+# Or copy the project example manually
 cp config.example.yaml ~/.nanogrip/config.yaml
 
 # Edit the config file
@@ -109,14 +112,17 @@ nano ~/.nanogrip/config.yaml
 ```yaml
 agents:
   defaults:
-    model: "glm-4-flash"
+    workspace: "~/.nanogrip/workspace"
+    model: "anthropic/claude-opus-4-5"
     maxTokens: 8192
     temperature: 0.7
 
 providers:
-  custom:
-    apiKey: "your-api-key-here"
-    apiBase: "https://open.bigmodel.cn/api/paas/v4"
+  openai:
+    apiKey: "your-openai-api-key"
+    # apiBase: "https://ark.cn-beijing.volces.com/api/v3" # Optional OpenAI-compatible base URL
+  anthropic:
+    apiKey: "your-anthropic-api-key"
 
 channels:
   telegram:
@@ -195,10 +201,9 @@ Built-in skills include:
 
 ### Current Limitations
 
-1. **OpenAI-Compatible API Format**
-   - Currently uses OpenAI-compatible request format for model responses
-   - May not work with models that don't support OpenAI request format
-   - **Planned**: Support for multiple API formats to ensure broader model compatibility
+1. **Provider Support**
+   - Only the official OpenAI and Anthropic APIs are supported
+   - Model names should use `openai/<model>` or `anthropic/<model>`
 
 2. **Telegram Channel File Support**
    - Telegram integration currently supports text and images only
@@ -222,5 +227,4 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - Inspired by [HKUDS/nanobot](https://github.com/HKUDS/nanobot)
 - Built with [Go](https://golang.org/)
-- Powered by various LLM providers
-
+- Powered by the official OpenAI and Anthropic APIs

@@ -9,7 +9,7 @@ import (
 	"log"     // log 用于日志记录
 	"sync"    // sync 用于同步原语
 
-	"github.com/Ailoc/nanogrip/internal/tools"        // 工具接口定义
+	"github.com/Ailoc/nanogrip/internal/tools"     // 工具接口定义
 	"github.com/mark3labs/mcp-go/client"           // mcp-go 客户端
 	"github.com/mark3labs/mcp-go/client/transport" // mcp-go 传输层
 	"github.com/mark3labs/mcp-go/mcp"              // mcp-go 核心类型
@@ -276,24 +276,11 @@ func (t *mcpToolWrapper) ToSchema() map[string]interface{} {
 func (t *mcpToolWrapper) ValidateParams(params map[string]interface{}) []string {
 	// MCP 工具参数验证较宽松，基本只检查必需参数
 	var errors []string
-	if t.parameters == nil {
-		return errors
-	}
-
-	// 获取必需参数列表
-	required, ok := t.parameters["required"].([]interface{})
-	if !ok {
-		return errors
-	}
 
 	// 检查每个必需参数是否存在
-	for _, req := range required {
-		reqStr, ok := req.(string)
-		if !ok {
-			continue
-		}
-		if _, exists := params[reqStr]; !exists {
-			errors = append(errors, fmt.Sprintf("missing required parameter: %s", reqStr))
+	for _, name := range tools.RequiredParameterNames(t.parameters) {
+		if _, exists := params[name]; !exists {
+			errors = append(errors, fmt.Sprintf("missing required parameter: %s", name))
 		}
 	}
 

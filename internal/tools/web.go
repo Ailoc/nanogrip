@@ -1,13 +1,13 @@
 package tools
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -19,8 +19,9 @@ import (
 // 使用 Tavily Search API
 type WebSearchTool struct {
 	BaseTool
-	apiKey     string // API密钥
-	maxResults int    // 最多返回的搜索结果数量
+	apiKey     string       // API密钥
+	provider   string       // 搜索提供商
+	maxResults int          // 最多返回的搜索结果数量
 	httpClient *http.Client // HTTP客户端，配置了超时时间
 }
 
@@ -34,10 +35,18 @@ type WebSearchTool struct {
 //
 //	配置好的WebSearchTool实例
 func NewWebSearchTool(apiKey string, provider string, maxResults int) *WebSearchTool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "tavily"
+	}
+	if maxResults <= 0 {
+		maxResults = 5
+	}
+
 	return &WebSearchTool{
 		BaseTool: NewBaseTool(
 			"web_search",
-			"Search the web for information using Tavily Search API",
+			"Search the web for current information",
 			map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -50,6 +59,7 @@ func NewWebSearchTool(apiKey string, provider string, maxResults int) *WebSearch
 			},
 		),
 		apiKey:     apiKey,
+		provider:   provider,
 		maxResults: maxResults,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -77,8 +87,73 @@ func (t *WebSearchTool) Execute(ctx context.Context, params map[string]interface
 		return "", fmt.Errorf("web search API key not configured")
 	}
 
-	// 执行 Tavily 搜索
-	return t.searchTavily(ctx, query)
+	switch t.provider {
+	case "tavily":
+		return t.searchTavily(ctx, query)
+	case "brave":
+		return t.searchBrave(ctx, query)
+	default:
+		return "", fmt.Errorf("unsupported web search provider: %s", t.provider)
+	}
+}
+
+// searchBrave 执行 Brave Search API
+func (t *WebSearchTool) searchBrave(ctx context.Context, query string) (string, error) {
+	apiURL := "https://api.search.brave.com/res/v1/web/search"
+	requestURL, err := url.Parse(apiURL)
+	if err != nil {
+		return "", err
+	}
+	values := requestURL.Query()
+	values.Set("q", query)
+	values.Set("count", fmt.Sprintf("%d", t.maxResults))
+	requestURL.RawQuery = values.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", requestURL.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Subscription-Token", t.apiKey)
+
+	resp, err := t.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("Brave API returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Web struct {
+			Results []struct {
+				Title       string `json:"title"`
+				URL         string `json:"url"`
+				Description string `json:"description"`
+			} `json:"results"`
+		} `json:"web"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return "", err
+	}
+
+	output := make([]map[string]string, 0, len(result.Web.Results))
+	for _, r := range result.Web.Results {
+		output = append(output, map[string]string{
+			"title":       r.Title,
+			"description": r.Description,
+			"url":         r.URL,
+		})
+	}
+
+	b, _ := json.Marshal(output)
+	return string(b), nil
 }
 
 // searchTavily 执行 Tavily Search API
@@ -97,7 +172,7 @@ func (t *WebSearchTool) searchTavily(ctx context.Context, query string) (string,
 		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, strings.NewReader(string(bodyBytes)))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return "", err
 	}
@@ -144,99 +219,4 @@ func (t *WebSearchTool) searchTavily(ctx context.Context, query string) (string,
 
 	b, _ := json.Marshal(output)
 	return string(b), nil
-}
-
-// SearchTavilyImage 搜索图片（使用 Tavily）
-func SearchTavilyImage(query string) ([]string, error) {
-	apiKey := os.Getenv("TAVILY_API_KEY")
-	if apiKey == "" {
-		return nil, fmt.Errorf("TAVILY_API_KEY not set")
-	}
-
-	apiURL := "https://api.tavily.com/search_image"
-
-	requestBody := map[string]interface{}{
-		"api_key": apiKey,
-		"query":   query,
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var result struct {
-		Images []string `json:"images"`
-	}
-
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-
-	return result.Images, nil
-}
-
-// SearchTavilyDeep 深度搜索（使用 Tavily）
-func SearchTavilyDeep(query string) (string, error) {
-	apiKey := os.Getenv("TAVILY_API_KEY")
-	if apiKey == "" {
-		return "", fmt.Errorf("TAVILY_API_KEY not set")
-	}
-
-	apiURL := "https://api.tavily.com/search_deep"
-
-	requestBody := map[string]interface{}{
-		"api_key": apiKey,
-		"query":   query,
-	}
-
-	bodyBytes, _ := json.Marshal(requestBody)
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(bodyBytes)))
-	if err != nil {
-		return "", err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	client := &http.Client{Timeout: 60 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	// 逐行读取，提取文本内容
-	var content strings.Builder
-	scanner := bufio.NewScanner(strings.NewReader(string(body)))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, `"content"`) || strings.Contains(line, `"text"`) {
-			content.WriteString(line)
-			content.WriteString("\n")
-		}
-	}
-
-	return content.String(), nil
 }

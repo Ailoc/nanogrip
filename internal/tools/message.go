@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 )
 
 // message.go - 消息发送工具
@@ -16,6 +17,7 @@ type MessageTool struct {
 	sendChan chan<- string // 消息发送通道，用于异步发送消息
 	channel  string        // 当前上下文频道
 	chatID   string        // 当前上下文聊天ID
+	mu       sync.RWMutex  // 保护上下文
 }
 
 // NewMessageTool 创建一个新的消息工具
@@ -69,6 +71,8 @@ func NewMessageTool(sendChan chan<- string) *MessageTool {
 //	channel: 当前频道
 //	chatID: 当前聊天ID
 func (t *MessageTool) SetContext(channel string, chatID string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.channel = channel
 	t.chatID = chatID
 }
@@ -102,10 +106,22 @@ func (t *MessageTool) Execute(ctx context.Context, params map[string]interface{}
 
 	// 如果未提供，使用上下文默认值
 	if channel == "" {
-		channel = t.channel
+		if toolCtx, ok := ToolContextFrom(ctx); ok {
+			channel = toolCtx.Channel
+		} else {
+			t.mu.RLock()
+			channel = t.channel
+			t.mu.RUnlock()
+		}
 	}
 	if chatID == "" {
-		chatID = t.chatID
+		if toolCtx, ok := ToolContextFrom(ctx); ok {
+			chatID = toolCtx.ChatID
+		} else {
+			t.mu.RLock()
+			chatID = t.chatID
+			t.mu.RUnlock()
+		}
 	}
 
 	// 构建消息对象

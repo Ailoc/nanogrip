@@ -205,7 +205,7 @@ func (s *SubagentManager) runSubagent(
 							// 解析 arguments JSON 字符串为 map[string]interface{}
 							var argsMap map[string]interface{}
 							if argsStr != "" {
-								json.Unmarshal([]byte(argsStr), &argsMap)
+								_ = json.Unmarshal([]byte(argsStr), &argsMap)
 							}
 
 							tools[j] = providers.ToolCallRequest{
@@ -260,13 +260,13 @@ func (s *SubagentManager) runSubagent(
 			// 添加包含工具调用的助手消息
 			toolCallDicts := make([]map[string]interface{}, len(resp.ToolCalls))
 			for i, tc := range resp.ToolCalls {
-				argsStr, _ := json.Marshal(tc.Arguments)
+				argsStr := providers.ToolArgumentsJSON(tc.Arguments)
 				toolCallDicts[i] = map[string]interface{}{
 					"id":   tc.ID,
 					"type": "function",
 					"function": map[string]string{
 						"name":      tc.Name,
-						"arguments": string(argsStr),
+						"arguments": argsStr,
 					},
 				}
 			}

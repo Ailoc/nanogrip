@@ -46,6 +46,8 @@ type CLIFlags struct {
 }
 
 func main() {
+	configureLogOutput()
+
 	// 解析命令行参数
 	flags := parseFlags()
 
@@ -63,6 +65,39 @@ func main() {
 
 	// 默认启动 gateway 模式
 	runGateway(flags.config)
+}
+
+type terminalLogWriter struct {
+	mu sync.Mutex
+}
+
+func configureLogOutput() {
+	log.SetFlags(0)
+	log.SetOutput(&terminalLogWriter{})
+}
+
+func (w *terminalLogWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	message := strings.TrimRight(string(p), "\r\n")
+	message = strings.TrimLeft(message, "\r\n")
+	if message == "" {
+		return len(p), nil
+	}
+
+	timestamp := time.Now().Format("2006/01/02 15:04:05")
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(os.Stderr, "\033[32m[%s] %s\033[0m\n", timestamp, line); err != nil {
+			return 0, err
+		}
+	}
+
+	return len(p), nil
 }
 
 // parseFlags 解析命令行参数
@@ -217,59 +252,21 @@ func handleInit(configPath string) {
 // getDefaultConfig 返回默认配置内容
 func getDefaultConfig() string {
 	return `# nanogrip 配置文件
-# 请根据您的需求修改以下配置
-
-# LLM 提供商配置
-# 支持: openai, anthropic, deepseek, openrouter, custom
-providers:
-  # OpenAI (GPT 系列)
-  openai:
-    apiKey: ""  # 填写您的 OpenAI API Key
-    # apiBase: ""  # 可选：自定义 API 端点
-
-  # Anthropic (Claude 系列)
-  anthropic:
-    apiKey: ""  # 填写您的 Anthropic API Key
-
-  # DeepSeek
-  deepseek:
-    apiKey: ""  # 填写您的 DeepSeek API Key
-    # apiBase: "https://api.deepseek.com/v1"  # 可选：自定义 API 端点
-
-  # OpenRouter (聚合多种模型)
-  openrouter:
-    apiKey: ""  # 填写您的 OpenRouter API Key
-    # apiBase: "https://openrouter.ai/api/v1"  # 可选：自定义 API 端点
-
-  # 自定义提供商 (如智谱 AI)
-  custom:
-    apiKey: ""  # 填写您的 API Key
-    apiBase: ""  # 填写 API 端点，如: https://open.bigmodel.cn/api/paas/v4
+# 由 "nanogrip init" 生成；请填入至少一个模型提供商的 API Key。
 
 # Agent 配置
 agents:
   defaults:
-    model: "glm-4-flash"  # 默认模型
-    maxTokens: 4096       # 最大输出令牌
-    temperature: 0.7       # 温度参数
-    maxToolIterations: 10  # 最大工具调用次数
-    memoryWindow: 50      # 记忆窗口大小
-
-# 工具配置
-tools:
-  # Web 搜索
-  web:
-    search:
-      apiKey: ""  # Tavily Search API Key
-      maxResults: 5
-
-  # Shell 命令
-  exec:
-    timeout: 60  # 命令超时时间(秒)
-
-  # 文件系统
-  filesystem:
-    restrictToWorkspace: true  # 限制在工作区内
+    workspace: "~/.nanogrip/workspace"
+    # 支持格式:
+    #   - "anthropic/claude-opus-4-5"
+    #   - "openai/gpt-4.1"
+    #   - "openai/<OpenAI-compatible-model-or-endpoint-id>"
+    model: "anthropic/claude-opus-4-5"
+    maxTokens: 8192
+    temperature: 0.7
+    maxToolIterations: 20
+    memoryWindow: 50
 
 # 通信通道配置
 channels:
@@ -277,6 +274,32 @@ channels:
     enabled: false
     token: ""
     allowFrom: []
+    replyToMessage: false
+
+# LLM 提供商配置
+# 当前只支持 OpenAI SDK 路径和 Anthropic SDK 路径。
+providers:
+  openai:
+    apiKey: ""   # 或设置环境变量 OPENAI_API_KEY
+    apiBase: ""  # 可选；OpenAI-compatible 服务填写基础地址，不要包含 /chat/completions
+                 # 例如 Doubao Ark: "https://ark.cn-beijing.volces.com/api/v3"
+
+  anthropic:
+    apiKey: ""   # 或设置环境变量 ANTHROPIC_API_KEY
+    apiBase: ""  # 可选；通常留空
+
+# 工具配置
+tools:
+  web:
+    search:
+      apiKey: ""       # Tavily 或 Brave Search API Key
+      provider: "tavily"
+      maxResults: 5
+
+  exec:
+    timeout: 60
+
+  restrictToWorkspace: false
 
 # MCP 服务器配置
 mcpServers: {}
@@ -304,6 +327,20 @@ func loadConfig(configPath string) (*config.Config, error) {
 	return config.Load(configPath)
 }
 
+func createProvider(cfg *config.Config) (providers.LLMProvider, error) {
+	return providers.NewProvider(providers.ProviderOptions{
+		DefaultModel: cfg.Agents.Defaults.Model,
+		OpenAI: providers.APIConfig{
+			APIKey:  cfg.Providers.OpenAI.APIKey,
+			APIBase: cfg.Providers.OpenAI.APIBase,
+		},
+		Anthropic: providers.APIConfig{
+			APIKey:  cfg.Providers.Anthropic.APIKey,
+			APIBase: cfg.Providers.Anthropic.APIBase,
+		},
+	})
+}
+
 // runAgent 运行 Agent 模式
 // 支持两种模式：
 // 1. 单消息模式：如果提供了 -m 参数，直接处理消息并退出
@@ -325,50 +362,11 @@ func runAgent(configPath, message string) {
 	}
 
 	// 配置 LLM 提供商
-	var apiKey string
-	apiBase := ""
-
-	// 尝试使用自定义提供商
-	if cfg.Providers.Custom.APIKey != "" {
-		apiKey = cfg.Providers.Custom.APIKey
-		apiBase = cfg.Providers.Custom.APIBase
-	}
-
-	// 如果没有自定义提供商，尝试 OpenRouter
-	if apiKey == "" {
-		apiKey = cfg.Providers.OpenRouter.APIKey
-		apiBase = cfg.Providers.OpenRouter.APIBase
-	}
-
-	// 尝试其他提供商
-	if apiKey == "" {
-		if cfg.Providers.Anthropic.APIKey != "" {
-			apiKey = cfg.Providers.Anthropic.APIKey
-		} else if cfg.Providers.OpenAI.APIKey != "" {
-			apiKey = cfg.Providers.OpenAI.APIKey
-		} else if cfg.Providers.DeepSeek.APIKey != "" {
-			apiKey = cfg.Providers.DeepSeek.APIKey
-			apiBase = cfg.Providers.DeepSeek.APIBase
-		}
-	}
-
-	if apiKey == "" {
-		fmt.Println("错误: 未配置 API 密钥")
-		fmt.Println("请在配置文件中设置 API 密钥，或设置环境变量")
+	provider, err := createProvider(cfg)
+	if err != nil {
+		fmt.Printf("配置 LLM 提供商失败: %v\n", err)
 		return
 	}
-
-	extraHeaders := cfg.Providers.Custom.ExtraHeaders
-	if extraHeaders == nil {
-		extraHeaders = cfg.Providers.OpenRouter.ExtraHeaders
-	}
-
-	provider := providers.NewLiteLLMProvider(
-		apiKey,
-		apiBase,
-		cfg.Agents.Defaults.Model,
-		extraHeaders,
-	)
 
 	// 创建工具注册表
 	toolRegistry := tools.NewToolRegistry()
@@ -378,7 +376,7 @@ func runAgent(configPath, message string) {
 			cfg.Tools.Web.Search.Provider,
 			cfg.Tools.Web.Search.MaxResults,
 		))
-		log.Printf("注册网络搜索工具: Tavily (maxResults: %d)", cfg.Tools.Web.Search.MaxResults)
+		log.Printf("注册网络搜索工具: %s (maxResults: %d)", cfg.Tools.Web.Search.Provider, cfg.Tools.Web.Search.MaxResults)
 	}
 	toolRegistry.Register(tools.NewShellTool(cfg.Tools.Exec.Timeout))
 	toolRegistry.Register(tools.NewFilesystemTool(workspace, cfg.Tools.RestrictToWorkspace))
@@ -402,8 +400,6 @@ func runAgent(configPath, message string) {
 			builtinSkills = "skills"
 		}
 	}
-	log.Printf("Loading built-in skills from: %s", builtinSkills)
-
 	// 创建子代理管理器（使用共享的消息总线）
 	subagentManager := agent.NewSubagentManager(
 		provider,
@@ -509,13 +505,15 @@ func runSingleMessageMode(agentLoop *agent.AgentLoop, message string) {
 
 	fmt.Printf(">>> %s\n", message)
 
-	response, err := agentLoop.ProcessDirect(ctx, message)
+	printer := newCLIStreamPrinter()
+	response, err := agentLoop.ProcessDirectStream(ctx, message, printer.Print)
 	if err != nil {
+		printer.Finish("")
 		fmt.Printf("错误: %v\n", err)
 		return
 	}
 
-	fmt.Printf("\n%s\n", response)
+	printer.Finish(response)
 }
 
 // runInteractiveMode 运行交互式命令行界面
@@ -542,7 +540,6 @@ func runInteractiveMode(agentLoop *agent.AgentLoop) {
 
 	go func() {
 		for {
-			fmt.Print("\n> ")
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				close(done)
@@ -553,6 +550,7 @@ func runInteractiveMode(agentLoop *agent.AgentLoop) {
 	}()
 
 	for {
+		fmt.Print("\n> ")
 		select {
 		case <-sigChan:
 			// 捕获到 Ctrl+C
@@ -590,14 +588,64 @@ func runInteractiveMode(agentLoop *agent.AgentLoop) {
 			}
 
 			// 处理消息
-			response, err := agentLoop.ProcessDirect(ctx, input)
+			printer := newCLIStreamPrinter()
+			response, err := agentLoop.ProcessDirectStream(ctx, input, printer.Print)
 			if err != nil {
+				printer.Finish("")
 				fmt.Printf("错误: %v\n", err)
 				continue
 			}
 
-			fmt.Printf("\n%s\n", response)
+			printer.Finish(response)
 		}
+	}
+}
+
+type cliStreamPrinter struct {
+	mu    sync.Mutex
+	wrote bool
+}
+
+func newCLIStreamPrinter() *cliStreamPrinter {
+	return &cliStreamPrinter{}
+}
+
+func (p *cliStreamPrinter) Print(delta string) {
+	if delta == "" {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.ensureStarted()
+	writeRunes(delta)
+}
+
+func (p *cliStreamPrinter) Finish(fallback string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if !p.wrote && fallback != "" {
+		p.ensureStarted()
+		writeRunes(fallback)
+	}
+	if p.wrote {
+		fmt.Println()
+	}
+}
+
+func (p *cliStreamPrinter) ensureStarted() {
+	if p.wrote {
+		return
+	}
+	fmt.Println()
+	p.wrote = true
+}
+
+func writeRunes(text string) {
+	for _, r := range text {
+		fmt.Fprint(os.Stdout, string(r))
 	}
 }
 
@@ -641,48 +689,10 @@ func runGateway(configPath string) {
 	// ============================================
 	// 第4步：配置 LLM 提供商
 	// ============================================
-	apiKey := ""
-	apiBase := ""
-
-	// 尝试使用自定义提供商（优先级最高）
-	if cfg.Providers.Custom.APIKey != "" {
-		apiKey = cfg.Providers.Custom.APIKey
-		apiBase = cfg.Providers.Custom.APIBase
+	provider, err := createProvider(cfg)
+	if err != nil {
+		log.Fatalf("配置 LLM 提供商失败: %v", err)
 	}
-
-	// 如果没有自定义提供商，尝试 OpenRouter
-	if apiKey == "" {
-		apiKey = cfg.Providers.OpenRouter.APIKey
-		apiBase = cfg.Providers.OpenRouter.APIBase
-	}
-
-	// 如果还没有，尝试其他提供商
-	if apiKey == "" {
-		if cfg.Providers.Anthropic.APIKey != "" {
-			apiKey = cfg.Providers.Anthropic.APIKey
-		} else if cfg.Providers.OpenAI.APIKey != "" {
-			apiKey = cfg.Providers.OpenAI.APIKey
-		} else if cfg.Providers.DeepSeek.APIKey != "" {
-			apiKey = cfg.Providers.DeepSeek.APIKey
-			apiBase = cfg.Providers.DeepSeek.APIBase
-		}
-	}
-
-	if apiKey == "" {
-		log.Println("Warning: 未配置 API 密钥")
-	}
-
-	extraHeaders := cfg.Providers.Custom.ExtraHeaders
-	if extraHeaders == nil {
-		extraHeaders = cfg.Providers.OpenRouter.ExtraHeaders
-	}
-
-	provider := providers.NewLiteLLMProvider(
-		apiKey,
-		apiBase,
-		cfg.Agents.Defaults.Model,
-		extraHeaders,
-	)
 
 	// ============================================
 	// 第5步：创建工具注册表
@@ -695,7 +705,7 @@ func runGateway(configPath string) {
 			cfg.Tools.Web.Search.Provider,
 			cfg.Tools.Web.Search.MaxResults,
 		))
-		log.Printf("注册网络搜索工具: Tavily (maxResults: %d)", cfg.Tools.Web.Search.MaxResults)
+		log.Printf("注册网络搜索工具: %s (maxResults: %d)", cfg.Tools.Web.Search.Provider, cfg.Tools.Web.Search.MaxResults)
 	} else {
 		log.Println("警告: 未配置网络搜索 API Key，请在配置文件中设置 tools.web.search.apiKey 以启用搜索功能")
 	}

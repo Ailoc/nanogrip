@@ -9,7 +9,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log"
 	"mime/multipart"
@@ -27,6 +29,12 @@ import (
 	"github.com/Ailoc/nanogrip/internal/config"
 )
 
+const (
+	telegramAPIBaseURL       = "https://api.telegram.org"
+	telegramFileBaseURL      = "https://api.telegram.org/file"
+	telegramMessageMaxLength = 4000
+)
+
 // TelegramChannel Telegram机器人频道实现
 // 主要特性：
 // 1. 使用getUpdates API进行长轮询接收消息
@@ -34,18 +42,19 @@ import (
 // 3. 支持用户白名单（AllowFrom）进行访问控制
 // 4. 支持Markdown到HTML的自动转换
 // 5. 自动分割超长消息（最大4000字符）
-// 6. 支持代理配置
-// 7. 支持交互式输入处理（当 Shell 命令需要用户输入时）
+// 6. 支持交互式输入处理（当 Shell 命令需要用户输入时）
 type TelegramChannel struct {
-	*BaseChannel                        // 嵌入基础频道，继承通用功能
-	config       *config.TelegramConfig // Telegram配置
-	token        string                 // Bot Token，用于API认证
-	allowFrom    map[string]bool       // 用户白名单，key为用户ID，value始终为true
-	httpClient   *http.Client          // HTTP客户端，用于调用Telegram API
-	chatIDs      map[string]int64      // 用户ID到聊天ID的映射，用于回复消息
-	mu           sync.RWMutex          // 读写锁，保护chatIDs和updateID的并发访问
-	updateID     int64                  // 当前已处理的最大update_id，用于增量获取消息
-	updateIDMu   sync.Mutex            // 保护updateID的互斥锁
+	*BaseChannel                                          // 嵌入基础频道，继承通用功能
+	config       *config.TelegramConfig                   // Telegram配置
+	token        string                                   // Bot Token，用于API认证
+	allowFrom    map[string]bool                          // 用户白名单，key为用户ID，value始终为true
+	httpClient   *http.Client                             // HTTP客户端，用于调用Telegram API
+	apiBaseURL   string                                   // Telegram Bot API 基础地址，测试时可替换
+	fileBaseURL  string                                   // Telegram 文件下载基础地址，测试时可替换
+	chatIDs      map[string]int64                         // 用户ID到聊天ID的映射，用于回复消息
+	mu           sync.RWMutex                             // 读写锁，保护chatIDs和updateID的并发访问
+	updateID     int64                                    // 当前已处理的最大update_id，用于增量获取消息
+	updateIDMu   sync.Mutex                               // 保护updateID的互斥锁
 	inputHandler func(channel, chatID, input string) bool // 输入处理回调，用于交互式输入
 }
 
@@ -69,24 +78,8 @@ func NewTelegramChannel(cfg *config.TelegramConfig, bus *bus.MessageBus) *Telegr
 		allowFrom[id] = true
 	}
 
-	// 创建 HTTP 客户端，支持代理
 	httpClient := &http.Client{
 		Timeout: 90 * time.Second, // 长轮询超时
-	}
-
-	// 如果配置了代理，创建支持代理的 transport
-	if cfg.Proxy != "" {
-		proxyURL := cfg.Proxy
-		if !strings.HasPrefix(proxyURL, "http://") && !strings.HasPrefix(proxyURL, "https://") && !strings.HasPrefix(proxyURL, "socks5://") {
-			proxyURL = "http://" + proxyURL
-		}
-
-		transport := &http.Transport{}
-		if proxyURL, err := url.Parse(proxyURL); err == nil {
-			transport.Proxy = http.ProxyURL(proxyURL)
-			httpClient.Transport = transport
-			log.Printf("Telegram channel using proxy: %s", proxyURL)
-		}
 	}
 
 	return &TelegramChannel{
@@ -95,6 +88,8 @@ func NewTelegramChannel(cfg *config.TelegramConfig, bus *bus.MessageBus) *Telegr
 		token:       cfg.Token,
 		allowFrom:   allowFrom,
 		httpClient:  httpClient,
+		apiBaseURL:  telegramAPIBaseURL,
+		fileBaseURL: telegramFileBaseURL,
 		chatIDs:     make(map[string]int64),
 	}
 }
@@ -112,6 +107,14 @@ func NewTelegramChannel(cfg *config.TelegramConfig, bus *bus.MessageBus) *Telegr
 func (c *TelegramChannel) Start(ctx context.Context) error {
 	if c.token == "" {
 		return fmt.Errorf("Telegram bot token not configured")
+	}
+
+	// getUpdates 与 webhook 不能同时启用。启动长轮询前主动删除 webhook，
+	// 避免 Bot 之前配置过 webhook 后一直收不到 Telegram 消息。
+	if err := c.deleteWebhook(); err != nil {
+		log.Printf("Telegram deleteWebhook warning: %v", err)
+	} else {
+		log.Println("Telegram webhook disabled for long polling")
 	}
 
 	c.running = true
@@ -132,6 +135,154 @@ func (c *TelegramChannel) Stop() error {
 	return nil
 }
 
+type telegramAPIEnvelope struct {
+	OK          bool            `json:"ok"`
+	ErrorCode   int             `json:"error_code"`
+	Description string          `json:"description"`
+	Result      json.RawMessage `json:"result"`
+}
+
+type telegramAPIError struct {
+	Method      string
+	StatusCode  int
+	ErrorCode   int
+	Description string
+	Body        string
+}
+
+func (e *telegramAPIError) Error() string {
+	parts := []string{fmt.Sprintf("Telegram API %s failed", e.Method)}
+	if e.StatusCode != 0 {
+		parts = append(parts, fmt.Sprintf("status=%d", e.StatusCode))
+	}
+	if e.ErrorCode != 0 {
+		parts = append(parts, fmt.Sprintf("error_code=%d", e.ErrorCode))
+	}
+	if e.Description != "" {
+		parts = append(parts, fmt.Sprintf("description=%q", e.Description))
+	} else if e.Body != "" {
+		parts = append(parts, fmt.Sprintf("response=%q", e.Body))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func (c *TelegramChannel) apiURL(method string) string {
+	return fmt.Sprintf("%s/bot%s/%s", strings.TrimRight(c.apiBaseURL, "/"), c.token, method)
+}
+
+func (c *TelegramChannel) fileURL(filePath string) string {
+	return fmt.Sprintf("%s/bot%s/%s", strings.TrimRight(c.fileBaseURL, "/"), c.token, filePath)
+}
+
+func isTelegramHTMLParseError(err error) bool {
+	var apiErr *telegramAPIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+
+	description := strings.ToLower(apiErr.Description)
+	return apiErr.StatusCode == http.StatusBadRequest &&
+		(strings.Contains(description, "parse") ||
+			strings.Contains(description, "entity") ||
+			strings.Contains(description, "tag"))
+}
+
+func telegramHTMLToPlainText(text string) string {
+	re := regexp.MustCompile(`<[^>]+>`)
+	return strings.TrimSpace(html.UnescapeString(re.ReplaceAllString(text, "")))
+}
+
+func (c *TelegramChannel) doTelegramJSON(method string, data map[string]interface{}, result interface{}) error {
+	body, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("POST", c.apiURL(method), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return decodeTelegramEnvelope(method, resp.StatusCode, respBody, result)
+}
+
+func (c *TelegramChannel) doTelegramGET(method string, query url.Values, result interface{}) error {
+	apiURL := c.apiURL(method)
+	if len(query) > 0 {
+		apiURL += "?" + query.Encode()
+	}
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return decodeTelegramEnvelope(method, resp.StatusCode, respBody, result)
+}
+
+func decodeTelegramEnvelope(method string, statusCode int, body []byte, result interface{}) error {
+	var envelope telegramAPIEnvelope
+	if len(body) > 0 {
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			if statusCode < 200 || statusCode >= 300 {
+				return &telegramAPIError{
+					Method:     method,
+					StatusCode: statusCode,
+					Body:       string(body),
+				}
+			}
+			return err
+		}
+	}
+
+	if statusCode < 200 || statusCode >= 300 || !envelope.OK {
+		return &telegramAPIError{
+			Method:      method,
+			StatusCode:  statusCode,
+			ErrorCode:   envelope.ErrorCode,
+			Description: envelope.Description,
+			Body:        string(body),
+		}
+	}
+
+	if result != nil && len(envelope.Result) > 0 {
+		if err := json.Unmarshal(envelope.Result, result); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (c *TelegramChannel) deleteWebhook() error {
+	return c.doTelegramJSON("deleteWebhook", map[string]interface{}{
+		"drop_pending_updates": false,
+	}, nil)
+}
+
 // Send 通过Telegram发送消息
 // 发送流程：
 // 1. 将ChatID字符串转换为int64类型
@@ -150,6 +301,7 @@ func (c *TelegramChannel) Send(msg bus.OutboundMessage) error {
 	if err != nil {
 		return fmt.Errorf("invalid chat_id: %w", err)
 	}
+	replyToMessageID := c.replyToMessageID(msg.Metadata)
 
 	// 检查是否有媒体文件需要发送
 	if len(msg.Media) > 0 {
@@ -166,14 +318,67 @@ func (c *TelegramChannel) Send(msg bus.OutboundMessage) error {
 	text := markdownToHTML(msg.Content)
 
 	// 分割超长消息（Telegram消息最大长度为4096字符，这里设置为4000以留出余量）
-	parts := splitMessage(text, 4000)
-	for _, part := range parts {
-		if err := c.sendMessage(chatID, part); err != nil {
+	parts := splitMessage(text, telegramMessageMaxLength)
+	for i, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+
+		partReplyToMessageID := int64(0)
+		if i == 0 {
+			partReplyToMessageID = replyToMessageID
+		}
+
+		if err := c.sendMessage(chatID, part, "HTML", partReplyToMessageID); err != nil {
+			if isTelegramHTMLParseError(err) {
+				plainText := telegramHTMLToPlainText(part)
+				if plainText == "" {
+					plainText = msg.Content
+				}
+				if fallbackErr := c.sendMessage(chatID, plainText, "", partReplyToMessageID); fallbackErr == nil {
+					log.Printf("Telegram HTML parse failed, sent plain text fallback: %v", err)
+					continue
+				} else {
+					return fmt.Errorf("%w; plain text fallback also failed: %v", err, fallbackErr)
+				}
+			}
 			return err
 		}
 	}
 
 	return nil
+}
+
+func (c *TelegramChannel) replyToMessageID(metadata map[string]interface{}) int64 {
+	if c.config == nil || !c.config.ReplyToMessage || metadata == nil {
+		return 0
+	}
+
+	for _, key := range []string{"telegram_message_id", "message_id"} {
+		if id := metadataInt64(metadata[key]); id > 0 {
+			return id
+		}
+	}
+	return 0
+}
+
+func metadataInt64(value interface{}) int64 {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int64:
+		return v
+	case float64:
+		return int64(v)
+	case json.Number:
+		id, _ := v.Int64()
+		return id
+	case string:
+		id, _ := strconv.ParseInt(v, 10, 64)
+		return id
+	default:
+		return 0
+	}
 }
 
 // sendMessage 发送单条消息到Telegram
@@ -184,39 +389,21 @@ func (c *TelegramChannel) Send(msg bus.OutboundMessage) error {
 //	text: 消息文本，支持HTML格式
 //
 // 返回: API调用失败时返回错误
-func (c *TelegramChannel) sendMessage(chatID int64, text string) error {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", c.token)
-
+func (c *TelegramChannel) sendMessage(chatID int64, text string, parseMode string, replyToMessageID int64) error {
 	// 构造请求数据
 	data := map[string]interface{}{
-		"chat_id":    chatID,
-		"text":       text,
-		"parse_mode": "HTML", // 使用HTML解析模式，支持富文本格式
+		"chat_id": chatID,
+		"text":    text,
+	}
+	if parseMode != "" {
+		data["parse_mode"] = parseMode
+	}
+	if replyToMessageID > 0 {
+		data["reply_to_message_id"] = replyToMessageID
+		data["allow_sending_without_reply"] = true
 	}
 
-	body, err := json.Marshal(data)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("Telegram API error: %d", resp.StatusCode)
-	}
-
-	return nil
+	return c.doTelegramJSON("sendMessage", data, nil)
 }
 
 // sendMedia 发送媒体文件到Telegram
@@ -243,8 +430,6 @@ func (c *TelegramChannel) sendMedia(chatID int64, mediaURL string, caption strin
 
 // sendPhotoByURL 通过 HTTP URL 发送图片
 func (c *TelegramChannel) sendPhotoByURL(chatID int64, photoURL string, caption string) error {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", c.token)
-
 	// 构造请求数据
 	data := map[string]interface{}{
 		"chat_id": chatID,
@@ -257,28 +442,18 @@ func (c *TelegramChannel) sendPhotoByURL(chatID int64, photoURL string, caption 
 		data["parse_mode"] = "HTML"
 	}
 
-	body, err := json.Marshal(data)
-	if err != nil {
+	if err := c.doTelegramJSON("sendPhoto", data, nil); err != nil {
+		if caption != "" && isTelegramHTMLParseError(err) {
+			data["caption"] = telegramHTMLToPlainText(data["caption"].(string))
+			delete(data, "parse_mode")
+			if fallbackErr := c.doTelegramJSON("sendPhoto", data, nil); fallbackErr == nil {
+				log.Printf("Telegram photo caption HTML parse failed, sent plain text fallback: %v", err)
+				return nil
+			} else {
+				return fmt.Errorf("%w; plain text fallback also failed: %v", err, fallbackErr)
+			}
+		}
 		return err
-	}
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 读取响应体以获取详细错误信息
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("Telegram API error: %d, response: %s", resp.StatusCode, string(respBody))
 	}
 
 	return nil
@@ -286,7 +461,7 @@ func (c *TelegramChannel) sendPhotoByURL(chatID int64, photoURL string, caption 
 
 // sendPhotoByFile 通过本地文件发送图片
 func (c *TelegramChannel) sendPhotoByFile(chatID int64, filePath string, caption string) error {
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/sendPhoto", c.token)
+	apiURL := c.apiURL("sendPhoto")
 
 	// 展开 $HOME 和 ~ 路径
 	expandedPath := os.ExpandEnv(filePath)
@@ -355,8 +530,8 @@ func (c *TelegramChannel) sendPhotoByFile(chatID int64, filePath string, caption
 
 	// 读取响应体以获取详细错误信息
 	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("Telegram API error: %d, response: %s", resp.StatusCode, string(respBody))
+	if err := decodeTelegramEnvelope("sendPhoto", resp.StatusCode, respBody, nil); err != nil {
+		return err
 	}
 
 	log.Printf("Successfully sent photo: %s", filePath)
@@ -405,7 +580,9 @@ func (c *TelegramChannel) pollUpdates(ctx context.Context) {
 						delay = maxDelay
 					}
 				}
-				time.Sleep(delay)
+				if !sleepWithContext(ctx, delay) {
+					return
+				}
 				continue
 			}
 
@@ -430,8 +607,22 @@ func (c *TelegramChannel) pollUpdates(ctx context.Context) {
 			}
 
 			// 短暂休眠，避免过于频繁的请求
-			time.Sleep(1 * time.Second)
+			if !sleepWithContext(ctx, 1*time.Second) {
+				return
+			}
 		}
+	}
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -444,39 +635,17 @@ func (c *TelegramChannel) getUpdates() ([]TelegramUpdate, error) {
 	offset := c.updateID
 	c.updateIDMu.Unlock()
 
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getUpdates?timeout=60", c.token)
-
-	// 添加offset参数，只获取大于等于updateID的更新
+	query := url.Values{}
+	query.Set("timeout", "60")
 	if offset > 0 {
-		apiURL += fmt.Sprintf("&offset=%d", offset)
+		query.Set("offset", strconv.FormatInt(offset, 10))
 	}
 
-	// 创建新的HTTP请求（避免连接重用问题）
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
+	var updates []TelegramUpdate
+	if err := c.doTelegramGET("getUpdates", query, &updates); err != nil {
 		return nil, err
 	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		OK     bool             `json:"ok"`
-		Result []TelegramUpdate `json:"result"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	if !result.OK {
-		return nil, fmt.Errorf("Telegram API error")
-	}
-
-	return result.Result, nil
+	return updates, nil
 }
 
 // handleUpdate 处理接收到的Telegram更新
@@ -498,6 +667,11 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 
 	msg := update.Message
 
+	if msg.Chat == nil {
+		log.Printf("Ignoring Telegram update %d without chat information", update.UpdateID)
+		return
+	}
+
 	// 忽略空消息（既没有文本也没有图片说明也没有文档）
 	// 注意：Caption 是媒体文件的说明，不应该算作纯文本消息
 	hasText := msg.Text != ""
@@ -510,16 +684,31 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 		return
 	}
 
-	// 构建发送者ID，格式为 "用户ID" 或 "用户ID|用户名"
-	senderID := strconv.FormatInt(msg.From.ID, 10)
-	if msg.From.Username != "" {
-		senderID = fmt.Sprintf("%s|%s", senderID, msg.From.Username)
+	// 构建发送者ID。普通私聊/群聊消息优先使用用户ID，频道消息或匿名管理员消息
+	// 可能没有 From 字段，此时退回到 chat ID，避免整个服务被特殊更新打崩。
+	chatIDStr := strconv.FormatInt(msg.Chat.ID, 10)
+	senderID := "chat:" + chatIDStr
+	allowKeys := []string{senderID, chatIDStr}
+	if msg.From != nil {
+		userID := strconv.FormatInt(msg.From.ID, 10)
+		senderID = userID
+		allowKeys = append(allowKeys, userID)
+		if msg.From.Username != "" {
+			senderID = fmt.Sprintf("%s|%s", userID, msg.From.Username)
+			allowKeys = append(allowKeys, senderID, msg.From.Username, "@"+msg.From.Username)
+		}
 	}
 
 	// 白名单检查：如果配置了白名单，则只处理白名单中的用户消息
 	if len(c.allowFrom) > 0 {
-		// 检查完整ID（用户ID|用户名）或仅用户ID
-		if !c.allowFrom[senderID] && !c.allowFrom[strconv.FormatInt(msg.From.ID, 10)] {
+		allowed := false
+		for _, key := range allowKeys {
+			if c.allowFrom[key] {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
 			log.Printf("Ignoring message from unauthorized user: %s", senderID)
 			return
 		}
@@ -538,7 +727,6 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 
 	// 检查是否有输入处理回调，并且消息是纯文本（不是图片或文档）
 	// 如果有交互式输入等待，将消息路由到输入处理器
-	chatIDStr := strconv.FormatInt(msg.Chat.ID, 10)
 	// 只有纯文本消息（没有媒体）才路由到输入处理器
 	if c.inputHandler != nil && hasText && !hasPhoto && !hasDocument && !hasCaption {
 		// 调用输入处理回调
@@ -584,12 +772,30 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 			ChatID:   strconv.FormatInt(msg.Chat.ID, 10),
 			Content:  content,
 			Media:    mediaList,
+			Metadata: telegramMessageMetadata(msg),
 		},
 	}
 
 	if err := c.bus.PublishInbound(inbound); err != nil {
 		log.Printf("Error publishing inbound message: %v", err)
 	}
+}
+
+func telegramMessageMetadata(msg *TelegramMessage) map[string]interface{} {
+	metadata := map[string]interface{}{
+		"telegram_message_id": msg.MessageID,
+		"message_id":          msg.MessageID,
+	}
+	if msg.Chat != nil {
+		metadata["telegram_chat_id"] = msg.Chat.ID
+		metadata["telegram_chat_type"] = msg.Chat.Type
+	}
+	if msg.From != nil {
+		metadata["telegram_user_id"] = msg.From.ID
+		metadata["telegram_username"] = msg.From.Username
+		metadata["telegram_first_name"] = msg.From.FirstName
+	}
+	return metadata
 }
 
 // downloadFileAsBase64 下载Telegram文件并转换为base64
@@ -600,34 +806,19 @@ func (c *TelegramChannel) handleUpdate(update TelegramUpdate) {
 // 返回: base64编码的文件数据（带MIME类型前缀），错误信息
 func (c *TelegramChannel) downloadFileAsBase64(fileID string) (string, error) {
 	// 1. 获取文件信息
-	apiURL := fmt.Sprintf("https://api.telegram.org/bot%s/getFile?file_id=%s", c.token, fileID)
-
-	resp, err := c.httpClient.Get(apiURL)
-	if err != nil {
+	var fileInfo struct {
+		FileID   string `json:"file_id"`
+		FilePath string `json:"file_path"`
+		FileSize int    `json:"file_size"`
+	}
+	query := url.Values{}
+	query.Set("file_id", fileID)
+	if err := c.doTelegramGET("getFile", query, &fileInfo); err != nil {
 		return "", fmt.Errorf("failed to get file info: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var fileResult struct {
-		OK bool `json:"ok"`
-		Result struct {
-			FileID   string `json:"file_id"`
-			FilePath string `json:"file_path"`
-			FileSize int    `json:"file_size"`
-		} `json:"result"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&fileResult); err != nil {
-		return "", fmt.Errorf("failed to decode file response: %w", err)
-	}
-
-	if !fileResult.OK {
-		return "", fmt.Errorf("getFile API returned error")
 	}
 
 	// 2. 下载文件
-	downloadURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", c.token, fileResult.Result.FilePath)
-	resp, err = c.httpClient.Get(downloadURL)
+	resp, err := c.httpClient.Get(c.fileURL(fileInfo.FilePath))
 	if err != nil {
 		return "", fmt.Errorf("failed to download file: %w", err)
 	}
@@ -638,19 +829,22 @@ func (c *TelegramChannel) downloadFileAsBase64(fileID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read file data: %w", err)
 	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("failed to download file: status=%d, response=%s", resp.StatusCode, string(data))
+	}
 
 	// 4. 转换为base64
 	base64Data := base64.StdEncoding.EncodeToString(data)
 
 	// 5. 根据文件扩展名确定MIME类型
 	mimeType := "application/octet-stream"
-	if strings.HasSuffix(fileResult.Result.FilePath, ".jpg") || strings.HasSuffix(fileResult.Result.FilePath, ".jpeg") {
+	if strings.HasSuffix(fileInfo.FilePath, ".jpg") || strings.HasSuffix(fileInfo.FilePath, ".jpeg") {
 		mimeType = "image/jpeg"
-	} else if strings.HasSuffix(fileResult.Result.FilePath, ".png") {
+	} else if strings.HasSuffix(fileInfo.FilePath, ".png") {
 		mimeType = "image/png"
-	} else if strings.HasSuffix(fileResult.Result.FilePath, ".gif") {
+	} else if strings.HasSuffix(fileInfo.FilePath, ".gif") {
 		mimeType = "image/gif"
-	} else if strings.HasSuffix(fileResult.Result.FilePath, ".pdf") {
+	} else if strings.HasSuffix(fileInfo.FilePath, ".pdf") {
 		mimeType = "application/pdf"
 	}
 
@@ -668,13 +862,13 @@ type TelegramUpdate struct {
 // TelegramMessage 表示Telegram消息
 // 包含消息的所有基本信息：发送者、聊天、内容等
 type TelegramMessage struct {
-	MessageID int64            `json:"message_id"` // 消息ID
-	From      *TelegramUser   `json:"from"`       // 发送者信息
-	Chat      *TelegramChat   `json:"chat"`       // 聊天信息
-	Text      string          `json:"text"`       // 文本消息内容
-	Caption   string          `json:"caption"`    // 媒体文件的说明文字
-	Photo     []TelegramPhoto `json:"photo"`      // 图片数组（如果消息包含图片）
-	Document  *TelegramDocument `json:"document"` // 文档（如果消息包含文件）
+	MessageID int64             `json:"message_id"` // 消息ID
+	From      *TelegramUser     `json:"from"`       // 发送者信息
+	Chat      *TelegramChat     `json:"chat"`       // 聊天信息
+	Text      string            `json:"text"`       // 文本消息内容
+	Caption   string            `json:"caption"`    // 媒体文件的说明文字
+	Photo     []TelegramPhoto   `json:"photo"`      // 图片数组（如果消息包含图片）
+	Document  *TelegramDocument `json:"document"`   // 文档（如果消息包含文件）
 }
 
 // TelegramPhoto 表示Telegram图片
@@ -819,36 +1013,45 @@ func markdownToHTML(text string) string {
 //
 // 返回: 分割后的消息片段列表
 func splitMessage(text string, maxLen int) []string {
+	if maxLen <= 0 {
+		return []string{text}
+	}
+
 	// 如果消息长度不超过限制，直接返回
-	if len(text) <= maxLen {
+	if len([]rune(text)) <= maxLen {
 		return []string{text}
 	}
 
 	var parts []string
-	for len(text) > 0 {
+	runes := []rune(text)
+	for len(runes) > 0 {
 		// 如果剩余文本不超过限制，直接添加
-		if len(text) <= maxLen {
-			parts = append(parts, text)
+		if len(runes) <= maxLen {
+			parts = append(parts, string(runes))
 			break
 		}
 
-		// 截取maxLen长度的文本
-		cut := text[:maxLen]
-
-		// 尝试在换行符处分割
-		pos := strings.LastIndex(cut, "\n")
-		if pos == -1 {
-			// 如果没有换行符，尝试在空格处分割
-			pos = strings.LastIndex(cut, " ")
+		// 优先在换行或空格处分割，且按 rune 计算，避免截断中文等多字节字符。
+		splitAt := -1
+		for i := maxLen - 1; i > 0; i-- {
+			if runes[i] == '\n' || runes[i] == ' ' {
+				splitAt = i
+				break
+			}
 		}
-		if pos == -1 {
-			// 如果都没有，强制在maxLen处截断
-			pos = maxLen
+		if splitAt <= 0 {
+			splitAt = maxLen
+		}
+
+		part := string(runes[:splitAt])
+		advance := splitAt
+		if advance < len(runes) && (runes[advance] == '\n' || runes[advance] == ' ') {
+			advance++
 		}
 
 		// 添加分割后的部分
-		parts = append(parts, text[:pos])
-		text = text[pos:]
+		parts = append(parts, part)
+		runes = runes[advance:]
 	}
 	return parts
 }
